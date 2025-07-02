@@ -10,7 +10,6 @@ _DB_URL = os.getenv('DB_URL')
 _LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 _DB_BATCH_SIZE = int(os.getenv('DB_BATCH_SIZE', '100'))
 _EXT_API_INFO_KOSIS_SYS = os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS')
-_PARALLEL_WORKERS = int(os.getenv('PARALLEL_WORKERS', '4'))
 _PARALLEL_WORKERS_FILE = int(os.getenv('PARALLEL_WORKERS_FILE', '4'))
 _PARALLEL_WORKERS_DB = int(os.getenv('PARALLEL_WORKERS_DB', '2'))
 
@@ -40,8 +39,6 @@ def get_data_collection_scope():
 def get_check_data_latest_date_mode():
     return _CHCEK_DATA_LATEST_DATE_MODE
 
-def get_parallel_workers():
-    return _PARALLEL_WORKERS
 
 def get_parallel_workers_file():
     return min(_PARALLEL_WORKERS_FILE, 10)
@@ -67,7 +64,8 @@ def load_target_src_tbl_id_list(env_path='.env'):
         return []
     except Exception as e:
         logging.error(f".env 파일 파싱 실패: {e}")
-        return []
+        # fallback: 직접 파싱
+        return [{'stat_tbl_id': tid, 'from_year': None} for tid in _parse_env_file_directly(env_path)]
 
 def _parse_env_file_directly(env_path):
     """섹션 헤더가 없는 .env 파일을 직접 파싱하여 TARGET_SRC_TBL_ID_LIST 섹션의 값들을 추출"""

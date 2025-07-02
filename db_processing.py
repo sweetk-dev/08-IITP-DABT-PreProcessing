@@ -230,7 +230,7 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
           AND stat_latest_chn_dt = :stat_latest_chn_dt
         """
     else:
-        # dt는 숫자로 변환
+        # dt는 숫자로 변환, '-'일 경우 0으로 변환
         insert_sql = f"""
         INSERT INTO {intg_tbl_id} (
             src_data_id, prd_de, c1, c2, c3, itm_id, unit_nm, dt, lst_chn_de, src_latest_chn_dt, created_by
@@ -241,7 +241,7 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
             c1, c2, c3,
             itm_id,
             unit_nm,
-            CAST(dt AS NUMERIC(15,3)),
+            CASE WHEN dt = '-' THEN 0 ELSE CAST(dt AS NUMERIC(15,3)) END,
             NULLIF(lst_chn_de, '')::date,
             :stat_latest_chn_dt,
             'SYS-BACH'

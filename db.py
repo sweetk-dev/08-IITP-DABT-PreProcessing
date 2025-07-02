@@ -99,19 +99,26 @@ def get_stats_src_api_info(ext_api_id):
 
 
 
-def get_stats_src_data_info(stat_api_id, stat_tbl_id_list):
-    db_logger.info(f"stats_src_data_info 일괄 조회 시작 (stat_api_id={stat_api_id}, stat_tbl_id_list={stat_tbl_id_list})")
+def get_stats_src_data_info(ext_api_id, stat_tbl_id_list):
+    db_logger.info(f"stats_src_data_info 일괄 조회 시작 (ext_api_id={ext_api_id}, stat_tbl_id_list={stat_tbl_id_list})")
     try:
         session = Session()
-        query = text("""
-            SELECT src_data_id, ext_api_id, ext_sys, stat_api_id, intg_tbl_id, stat_title, stat_org_id, stat_survey_name, stat_pub_dt, periodicity, collect_start_dt, collect_end_dt, stat_tbl_id, stat_tbl_name, stat_latest_chn_dt, stat_data_ref_dt, avail_cat_cols, status, del_yn
-            FROM stats_src_data_info
-            WHERE stat_api_id = :stat_api_id AND stat_tbl_id IN :stat_tbl_id_list AND del_yn = 'N' AND status = 'A'
-        """)
-        db_logger.debug(f"Executing SQL: {query}")
-        result = session.execute(query, {'stat_api_id': stat_api_id, 'stat_tbl_id_list': tuple(stat_tbl_id_list)})
+        if len(stat_tbl_id_list) == 1:
+            query = text("""
+                SELECT src_data_id, ext_api_id, ext_sys, stat_api_id, intg_tbl_id, stat_title, stat_org_id, stat_survey_name, stat_pub_dt, periodicity, collect_start_dt, collect_end_dt, stat_tbl_id, stat_tbl_name, stat_latest_chn_dt, stat_data_ref_dt, avail_cat_cols, status, del_yn
+                FROM stats_src_data_info
+                WHERE ext_api_id = :ext_api_id AND stat_tbl_id = :stat_tbl_id AND del_yn = 'N' AND status = 'A'
+            """)
+            result = session.execute(query, {'ext_api_id': ext_api_id, 'stat_tbl_id': stat_tbl_id_list[0]})
+        else:
+            query = text("""
+                SELECT src_data_id, ext_api_id, ext_sys, stat_api_id, intg_tbl_id, stat_title, stat_org_id, stat_survey_name, stat_pub_dt, periodicity, collect_start_dt, collect_end_dt, stat_tbl_id, stat_tbl_name, stat_latest_chn_dt, stat_data_ref_dt, avail_cat_cols, status, del_yn
+                FROM stats_src_data_info
+                WHERE ext_api_id = :ext_api_id AND stat_tbl_id IN :stat_tbl_id_list AND del_yn = 'N' AND status = 'A'
+            """)
+            result = session.execute(query, {'ext_api_id': ext_api_id, 'stat_tbl_id_list': tuple(stat_tbl_id_list)})
         rows = result.fetchall()
-        info_dict = {row.stat_tbl_id: dict(row._mapping) for row in rows}
+        info_dict = {str(row.stat_tbl_id): dict(row._mapping) for row in rows}
         db_logger.info(f"stats_src_data_info 일괄 조회 성공: {len(info_dict)}건")
         return info_dict
     except Exception as e:

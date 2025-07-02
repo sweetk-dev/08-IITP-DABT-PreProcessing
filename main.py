@@ -81,12 +81,19 @@ def get_filtered_stats_src_list(data_collection_scope):
         target_id_set = set(item['stat_tbl_id'] for item in env_target_list)
         existing_stat_tbl_ids = {s.get('stat_tbl_id') for s in stats_src_list}
         missing_stat_tbl_ids = target_id_set - existing_stat_tbl_ids
+        logging.info(f"[DEBUG] env target_id_set: {target_id_set}")
+        logging.info(f"[DEBUG] DB existing_stat_tbl_ids: {existing_stat_tbl_ids}")
+        logging.info(f"[DEBUG] missing_stat_tbl_ids: {missing_stat_tbl_ids}")
+        logging.info(f"[DEBUG] stats_src_list(before filter): {stats_src_list}")
         if missing_stat_tbl_ids:
             error_msg = f"설정된 stat_tbl_id 중 DB에 존재하지 않는 것들: {list(missing_stat_tbl_ids)}"
             logging.error(error_msg)
             print(f"[ERROR] {error_msg}")
             sys.exit(1)
         stats_src_list = [s for s in stats_src_list if s.get('stat_tbl_id') in target_id_set]
+        logging.info(f"[DEBUG] stats_src_list(after filter): {stats_src_list}")
+        if not stats_src_list:
+            logging.warning("[DEBUG] PART 모드에서 stats_src_list가 비어 있습니다!")
         logging.info(f"PART 모드: {len(target_id_set)} -> {len(stats_src_list)}개 통계 소스 필터링 완료")
     return api_info, stats_src_list, env_target_list
 
@@ -158,8 +165,10 @@ def save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict):
     parallel_workers = get_parallel_workers_file()
     args_list = []
     for stats_src in stats_src_list:
-        stat_tbl_id = stats_src['stat_tbl_id']
+        stat_tbl_id = str(stats_src['stat_tbl_id'])
         data_info = stats_src_data_info_dict.get(stat_tbl_id, {})
+        if not data_info:
+            logging.warning(f"[{stat_tbl_id}] DB 매핑 정보 없음. 파일명에 unknown이 들어갈 수 있습니다.")
         args_list.append((api_info, stats_src, dirs, data_info))
     with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
         futures = [executor.submit(save_single_file, args) for args in args_list]
@@ -177,8 +186,8 @@ def main():
         api_info, stats_src_list, env_target_list = get_filtered_stats_src_list(data_collection_scope)
         dirs = prepare_data_directories()
         stat_tbl_id_list = [s['stat_tbl_id'] for s in stats_src_list]
-        stat_api_id = stats_src_list[0]['stat_api_id'] if stats_src_list else None
-        stats_src_data_info_dict = get_stats_src_data_info(stat_api_id, stat_tbl_id_list)
+        ext_api_id = stats_src_list[0]['ext_api_id'] if stats_src_list else None
+        stats_src_data_info_dict = get_stats_src_data_info(ext_api_id, stat_tbl_id_list)
         
         saved_files_info = save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict)
 
