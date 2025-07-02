@@ -109,7 +109,7 @@ def _insert_origin_data(session, data_json, file_info, stats_src, stats_data_inf
     src_data_id = file_info['src_data_id']
     stat_latest_chn_dt = latest_date
     data_ref_dt = date.today()
-    created_by = "SYS-BACH"
+    created_by = "SYS-BATCH"
 
     # data_json이 리스트가 아닐 경우 리스트로 변환
     if not isinstance(data_json, list):
@@ -223,14 +223,14 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
             dt,  -- 문자열 그대로
             NULLIF(lst_chn_de, '')::date,
             :stat_latest_chn_dt,
-            'SYS-BACH'
+            'SYS-BATCH'
         FROM stats_kosis_origin_data
         WHERE src_data_id = :src_data_id
           AND tbl_id = :stat_tbl_id
           AND stat_latest_chn_dt = :stat_latest_chn_dt
         """
     else:
-        # dt는 숫자로 변환, '-'일 경우 0으로 변환
+        # dt는 숫자로 변환, '-' 또는 ''일 경우 0으로 변환
         insert_sql = f"""
         INSERT INTO {intg_tbl_id} (
             src_data_id, prd_de, c1, c2, c3, itm_id, unit_nm, dt, lst_chn_de, src_latest_chn_dt, created_by
@@ -241,10 +241,10 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
             c1, c2, c3,
             itm_id,
             unit_nm,
-            CASE WHEN dt = '-' THEN 0 ELSE CAST(dt AS NUMERIC(15,3)) END,
+            CASE WHEN dt = '-' OR dt = '' THEN 0 ELSE CAST(dt AS NUMERIC(15,3)) END,
             NULLIF(lst_chn_de, '')::date,
             :stat_latest_chn_dt,
-            'SYS-BACH'
+            'SYS-BATCH'
         FROM stats_kosis_origin_data
         WHERE src_data_id = :src_data_id
           AND tbl_id = :stat_tbl_id
@@ -280,7 +280,7 @@ def _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, 
     src_data_id = file_info['src_data_id']
     stat_tbl_id = file_info['stat_tbl_id']
     stat_latest_chn_dt = latest_date
-    created_by = "SYS-BACH"
+    created_by = "SYS-BATCH"
 
     # 1. 기존 데이터 삭제
     delete_sql = """
@@ -297,7 +297,7 @@ def _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, 
             'stat_latest_chn_dt': stat_latest_chn_dt
         }
     )
-    logging.info("stats_kosis_metadata_code에서 기존 메타데이터 삭제 완료.")
+    logging.info("stats_kosis_metadata_code에서 기존 메타데이터 삭제 완료., {}-{}-{}", src_data_id, stat_tbl_id, stat_latest_chn_dt)
 
     # 2. meta XML 파싱 및 row 매핑 (설명문 등 무시)
     root = parse_xml_skip_leading_nonxml(meta_path)
