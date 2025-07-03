@@ -1,4 +1,5 @@
-# KOSIS 데이터 API 연동 및 파일/DB 저장 툴
+# 08-IITP-DABT-PreProcessing-
+8.데이터 수집 및 전처리 모듈
 
 ## 개요
 KOSIS(국가통계포털) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
