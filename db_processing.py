@@ -46,6 +46,8 @@ def process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_d
         # 모든 통계 성공 후에만 시스템 전체 동기화 시각 갱신
         _update_sys_ext_api_info(Session(), api_info.get('ext_api_id'))
         logging.info("DB 처리가 성공적으로 완료되었습니다.")
+        # 모든 데이터 커밋 후 cleanup 실행
+        cleanup_old_data(api_info, stats_src_list, stats_src_data_info_dict)
     except Exception as e:
         logging.error(f"DB 처리 중 에러가 발생하여 롤백합니다: {e}", exc_info=True)
         import sys; sys.exit(1)
@@ -297,7 +299,7 @@ def _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, 
             'stat_latest_chn_dt': stat_latest_chn_dt
         }
     )
-    logging.info("stats_kosis_metadata_code에서 기존 메타데이터 삭제 완료., {}-{}-{}", src_data_id, stat_tbl_id, stat_latest_chn_dt)
+    logging.info(f"stats_kosis_metadata_code에서 기존 메타데이터 삭제 완료., {src_data_id}-{stat_tbl_id}-{stat_latest_chn_dt}")
 
     # 2. meta XML 파싱 및 row 매핑 (설명문 등 무시)
     root = parse_xml_skip_leading_nonxml(meta_path)
@@ -342,25 +344,28 @@ def _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, 
 def _update_stats_src_data_info(session, file_info, data_json, latest_date):
     """
     stats_src_data_info 테이블의 stat_latest_chn_dt, stat_data_ref_dt, avail_cat_cols 컬럼 업데이트
+    updated_at, updated_by도 같이 업데이트
     """
     from datetime import date
     src_data_id = file_info['src_data_id']
     stat_tbl_id = file_info['stat_tbl_id']
     stat_latest_chn_dt = latest_date
     stat_data_ref_dt = date.today().strftime('%Y-%m-%d')
-
+    updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    updated_by = 'SYS-BATCH'
     # avail_cat_cols: data_json에서 실제 값이 존재하는 c1~c4만 추출
     cat_cols = []
     for c in ['c1', 'c2', 'c3', 'c4']:
         if any((row.get(c.upper()) or row.get(c)) for row in data_json):
             cat_cols.append(c)
     avail_cat_cols = pyjson.dumps(cat_cols, ensure_ascii=False)
-
     update_sql = """
     UPDATE stats_src_data_info
     SET stat_latest_chn_dt = :stat_latest_chn_dt,
         stat_data_ref_dt = :stat_data_ref_dt,
-        avail_cat_cols = :avail_cat_cols
+        avail_cat_cols = :avail_cat_cols,
+        updated_at = :updated_at,
+        updated_by = :updated_by
     WHERE src_data_id = :src_data_id
       AND stat_tbl_id = :stat_tbl_id
     """
@@ -370,22 +375,27 @@ def _update_stats_src_data_info(session, file_info, data_json, latest_date):
             'stat_latest_chn_dt': stat_latest_chn_dt,
             'stat_data_ref_dt': stat_data_ref_dt,
             'avail_cat_cols': avail_cat_cols,
+            'updated_at': updated_at,
+            'updated_by': updated_by,
             'src_data_id': src_data_id,
             'stat_tbl_id': stat_tbl_id
         }
     )
-    logging.info(f"stats_src_data_info({src_data_id}, {stat_tbl_id}) 업데이트 완료: stat_latest_chn_dt={stat_latest_chn_dt}, stat_data_ref_dt={stat_data_ref_dt}, avail_cat_cols={avail_cat_cols}")
+    logging.info(f"stats_src_data_info({src_data_id}, {stat_tbl_id}) 업데이트 완료: stat_latest_chn_dt={stat_latest_chn_dt}, stat_data_ref_dt={stat_data_ref_dt}, avail_cat_cols={avail_cat_cols}, updated_at={updated_at}, updated_by={updated_by}")
 
 def _update_management_tables(session, file_info, api_info, stats_src, stats_data_info):
     """
     sys_stats_src_api_info 테이블의 최신화(업데이트)
+    updated_at, updated_by도 같이 업데이트
     """
     now = datetime.now()
     now_str = now.strftime('%Y-%m-%d %H:%M:%S')
     # sys_stats_src_api_info 업데이트
     update_sql1 = """
     UPDATE sys_stats_src_api_info
-    SET latest_sync_time = :latest_sync_time
+    SET latest_sync_time = :latest_sync_time,
+        updated_at = :updated_at,
+        updated_by = :updated_by
     WHERE ext_api_id = :ext_api_id
       AND stat_api_id = :stat_api_id
       AND stat_tbl_id = :stat_tbl_id
@@ -394,32 +404,87 @@ def _update_management_tables(session, file_info, api_info, stats_src, stats_dat
         text(update_sql1),
         {
             'latest_sync_time': now_str,
+            'updated_at': now_str,
+            'updated_by': 'SYS-BATCH',
             'ext_api_id': file_info['ext_api_id'],
             'stat_api_id': file_info['stat_api_id'],
             'stat_tbl_id': file_info['stat_tbl_id']
         }
     )
-    logging.info(f"sys_stats_src_api_info({file_info['ext_api_id']}, {file_info['stat_api_id']}, {file_info['stat_tbl_id']}) 최신화 완료: latest_sync_time={now_str}")
+    logging.info(f"sys_stats_src_api_info({file_info['ext_api_id']}, {file_info['stat_api_id']}, {file_info['stat_tbl_id']}) 최신화 완료: latest_sync_time={now_str}, updated_at={now_str}, updated_by=SYS-BATCH")
 
 def _update_sys_ext_api_info(session, ext_api_id):
     """
     sys_ext_api_info 테이블의 최신화(업데이트) - 전체 성공 후 한 번만 호출
+    updated_at, updated_by도 같이 업데이트
     """
     now = datetime.now()
     now_str = now.strftime('%Y-%m-%d %H:%M:%S')
     update_sql2 = """
     UPDATE sys_ext_api_info
-    SET latest_sync_time = :latest_sync_time
+    SET latest_sync_time = :latest_sync_time,
+        updated_at = :updated_at,
+        updated_by = :updated_by
     WHERE ext_api_id = :ext_api_id
     """
     session.execute(
         text(update_sql2),
         {
             'latest_sync_time': now_str,
+            'updated_at': now_str,
+            'updated_by': 'SYS-BATCH',
             'ext_api_id': ext_api_id
         }
     )
-    logging.info(f"sys_ext_api_info({ext_api_id}) 최신화 완료: latest_sync_time={now_str}")
+    session.commit()
+    logging.info(f"sys_ext_api_info({ext_api_id}) 최신화 완료: latest_sync_time={now_str}, updated_at={now_str}, updated_by=SYS-BATCH")
+
+def cleanup_old_data(api_info, stats_src_list, stats_src_data_info_dict):
+    """
+    모든 데이터 커밋 후, 과거 데이터 삭제(최신 데이터만 남김)
+    """
+    from sqlalchemy import text
+    session = Session()
+
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    try:
+        for stats_src in stats_src_list:
+            stat_tbl_id = stats_src['stat_tbl_id']
+            data_info = stats_src_data_info_dict.get(stat_tbl_id, {})
+            latest_chn_dt = data_info.get('stat_latest_chn_dt')
+            intg_tbl_id = data_info.get('intg_tbl_id')
+            src_data_id = data_info.get('src_data_id')
+            src_latest_chn_dt = latest_chn_dt  # 보통 동일
+
+            # 1. stats_kosis_origin_data, stats_kosis_metadata_code
+            for tbl, col in [('stats_kosis_origin_data', 'stat_latest_chn_dt'),
+                             ('stats_kosis_metadata_code', 'stat_latest_chn_dt')]:
+                del_sql = f"""DELETE FROM {tbl}
+                              WHERE tbl_id = :stat_tbl_id
+                                AND (
+                                    TRIM({col}::text) != :latest_chn_dt
+                                    OR (TRIM({col}::text) = :latest_chn_dt AND DATE(created_at) != :today)
+                                )"""
+                session.execute(text(del_sql), {'stat_tbl_id': stat_tbl_id, 'latest_chn_dt': latest_chn_dt.strip(), 'today': today})
+                logging.info(f"[{stat_tbl_id}] {tbl} 과거 데이터 삭제 완료 (복합조건) | latest_chn_dt={latest_chn_dt.strip()}, today={today}")
+
+            # 2. intg_tbl_id
+            if intg_tbl_id:
+                del_sql = f"""DELETE FROM {intg_tbl_id}
+                              WHERE src_data_id = :src_data_id
+                                AND (
+                                    TRIM(src_latest_chn_dt::text) != :src_latest_chn_dt
+                                    OR (TRIM(src_latest_chn_dt::text) = :src_latest_chn_dt AND DATE(created_at) != :today)
+                                )"""
+                session.execute(text(del_sql), {'src_data_id': src_data_id, 'src_latest_chn_dt': latest_chn_dt, 'today': today})
+                logging.info(f"[{stat_tbl_id}] {intg_tbl_id} 과거 데이터 삭제 완료 (복합조건) | src_data_id={src_data_id}, src_latest_chn_dt={latest_chn_dt}, today={today}")
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logging.error(f"과거 데이터 삭제 중 에러: {e}", exc_info=True)
+    finally:
+        session.close()
 
 # 세부 단계별 함수들 (추후 구현)
 # def _parse_latest_file(...)
