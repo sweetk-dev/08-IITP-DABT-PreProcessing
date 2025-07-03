@@ -31,8 +31,16 @@ def fetch_kosis_meta(api_info, stats_src, stats_src_data_info):
     if not url:
         logging.error('KOSIS meta url 생성 실패')
         return None
-    response = requests.get(url)
-    response.raise_for_status()
+    try:
+        response = requests.get(url)
+        if response.status_code != 200:
+            logging.error(f'KOSIS meta API 요청 실패: status={response.status_code}, url={url}, response={response.text[:200]}')
+            print(f"[ERROR] KOSIS meta API 요청 실패: status={response.status_code}, url={url}")
+            import sys; sys.exit(1)
+    except Exception as e:
+        logging.error(f'KOSIS meta API 요청 중 예외 발생: {e}', exc_info=True)
+        print(f"[ERROR] KOSIS meta API 요청 중 예외 발생: {e}")
+        import sys; sys.exit(1)
     if file_format == 'json':
         return response.json()
     else:
@@ -43,8 +51,16 @@ def fetch_kosis_latest(api_info, stats_src, stats_src_data_info):
     if not url:
         logging.error('KOSIS latest url 생성 실패')
         return None
-    response = requests.get(url)
-    response.raise_for_status()
+    try:
+        response = requests.get(url)
+        if response.status_code != 200:
+            logging.error(f'KOSIS latest API 요청 실패: status={response.status_code}, url={url}, response={response.text[:200]}')
+            print(f"[ERROR] KOSIS latest API 요청 실패: status={response.status_code}, url={url}")
+            import sys; sys.exit(1)
+    except Exception as e:
+        logging.error(f'KOSIS latest API 요청 중 예외 발생: {e}', exc_info=True)
+        print(f"[ERROR] KOSIS latest API 요청 중 예외 발생: {e}")
+        import sys; sys.exit(1)
     if file_format == 'json':
         return response.json()
     else:
@@ -55,8 +71,16 @@ def fetch_kosis_data(api_info, stats_src, stats_src_data_info):
     if not url:
         logging.error('KOSIS data url 생성 실패')
         return None
-    response = requests.get(url)
-    response.raise_for_status()
+    try:
+        response = requests.get(url)
+        if response.status_code != 200:
+            logging.error(f'KOSIS data API 요청 실패: status={response.status_code}, url={url}, response={response.text[:200]}')
+            print(f"[ERROR] KOSIS data API 요청 실패: status={response.status_code}, url={url}")
+            import sys; sys.exit(1)
+    except Exception as e:
+        logging.error(f'KOSIS data API 요청 중 예외 발생: {e}', exc_info=True)
+        print(f"[ERROR] KOSIS data API 요청 중 예외 발생: {e}")
+        import sys; sys.exit(1)
     if file_format == 'json':
         return response.json()
     else:
