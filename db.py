@@ -1,6 +1,6 @@
 import logging
 import os
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 from config import get_db_url, get_kosis_sys
@@ -14,6 +14,18 @@ Session = sessionmaker(bind=engine)
 db_logger = logging.getLogger('db')
 
 EXT_SYS_KOSIS = get_kosis_sys()
+
+def set_timezone(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("SET TIME ZONE 'Asia/Seoul';")
+    cursor.close()
+
+# 엔진에 이벤트 리스너 등록
+try:
+    event.listen(engine, 'connect', set_timezone)
+    db_logger.info("DB 세션 타임존을 Asia/Seoul로 설정했습니다.")
+except Exception as e:
+    db_logger.error(f"DB 타임존 설정 실패: {e}")
 
 def get_api_info():
     db_logger.info("KOSIS API 정보 조회 시작")
