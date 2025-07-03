@@ -158,7 +158,7 @@ def save_single_file(args):
         }
     except Exception as e:
         logging.error(f"[{stat_tbl_id}] {func_name} - 파일 저장 중 에러: {e}", exc_info=True)
-        raise
+        import sys; sys.exit(1)
 
 def save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict):
     saved_files_info = []
