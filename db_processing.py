@@ -34,7 +34,7 @@ def process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_d
         except Exception as e:
             session.rollback()
             logging.error(f"DB 처리 중 에러(통계: {file_info['stat_tbl_id']}): {e}", exc_info=True)
-            raise
+            import sys; sys.exit(1)
         finally:
             session.close()
 
@@ -48,7 +48,7 @@ def process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_d
         logging.info("DB 처리가 성공적으로 완료되었습니다.")
     except Exception as e:
         logging.error(f"DB 처리 중 에러가 발생하여 롤백합니다: {e}", exc_info=True)
-        raise
+        import sys; sys.exit(1)
 
 def process_single_statistic(session, file_info, api_info, stats_src, stats_data_info):
     """
