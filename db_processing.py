@@ -194,20 +194,22 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
         logging.warning(f"intg_tbl_id가 없어 통합 테이블 이관을 건너뜁니다. stat_tbl_id={stat_tbl_id}")
         return
 
-    # 1. 기존 데이터 삭제
+    # 1. 기존 데이터 삭제 (동일한 날짜의 데이터는 생성 시간을 고려하여 삭제)
     delete_sql = f"""
     DELETE FROM {intg_tbl_id}
     WHERE src_data_id = :src_data_id
       AND src_latest_chn_dt = :stat_latest_chn_dt
+      AND DATE(created_at) < :today
     """
     session.execute(
         text(delete_sql),
         {
             'src_data_id': src_data_id,
-            'stat_latest_chn_dt': stat_latest_chn_dt
+            'stat_latest_chn_dt': stat_latest_chn_dt,
+            'today': datetime.now().strftime('%Y-%m-%d')
         }
     )
-    logging.info(f"{intg_tbl_id}에서 기존 데이터 삭제 완료.")
+    logging.info(f"{intg_tbl_id}에서 기존 데이터 삭제 완료 (오늘 이전 데이터만 삭제).")
 
     # 2. 신규 데이터 insert (stats_kosis_origin_data에서 select하여 insert)
     if intg_tbl_id == "stats_dis_hlth_disease_cost_sub":
@@ -442,6 +444,7 @@ def _update_sys_ext_api_info(session, ext_api_id):
 def cleanup_old_data(api_info, stats_src_list, stats_src_data_info_dict):
     """
     모든 데이터 커밋 후, 과거 데이터 삭제(최신 데이터만 남김)
+    최신 stat_latest_chn_dt 값을 데이터베이스에서 직접 조회하여 사용
     """
     from sqlalchemy import text
     session = Session()
@@ -452,9 +455,26 @@ def cleanup_old_data(api_info, stats_src_list, stats_src_data_info_dict):
         for stats_src in stats_src_list:
             stat_tbl_id = stats_src['stat_tbl_id']
             data_info = stats_src_data_info_dict.get(stat_tbl_id, {})
-            latest_chn_dt = data_info.get('stat_latest_chn_dt')
             intg_tbl_id = data_info.get('intg_tbl_id')
             src_data_id = data_info.get('src_data_id')
+            
+            # 최신 stat_latest_chn_dt 값을 데이터베이스에서 직접 조회
+            latest_query = text("""
+                SELECT stat_latest_chn_dt 
+                FROM stats_src_data_info 
+                WHERE stat_tbl_id = :stat_tbl_id AND del_yn = 'N' AND status = 'A'
+            """)
+            result = session.execute(latest_query, {'stat_tbl_id': stat_tbl_id}).fetchone()
+            
+            if not result:
+                logging.warning(f"[{stat_tbl_id}] stats_src_data_info에서 최신 데이터를 찾을 수 없습니다. 과거 데이터 삭제를 건너뜁니다.")
+                continue
+                
+            latest_chn_dt = result.stat_latest_chn_dt
+            if not latest_chn_dt:
+                logging.warning(f"[{stat_tbl_id}] stat_latest_chn_dt가 NULL입니다. 과거 데이터 삭제를 건너뜁니다.")
+                continue
+                
             src_latest_chn_dt = latest_chn_dt  # 보통 동일
 
             # 1. stats_kosis_origin_data, stats_kosis_metadata_code
