@@ -1,5 +1,4 @@
-# 08-IITP-DABT-PreProcessing-
-8.데이터 수집 및 전처리 모듈
+# KOSIS 데이터 API 연동 및 파일/DB 저장 툴
 
 ## 개요
 KOSIS(국가통계포털) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
@@ -9,6 +8,8 @@ KOSIS(국가통계포털) 데이터를 API를 통해 수집하여, 옵션에 따
 - KOSIS API로 데이터/메타 수집
 - 날짜별 폴더 및 규칙에 맞는 파일명으로 저장
 - 옵션에 따라 파일 저장만 또는 DB 삽입까지 수행
+- 통계 데이터 통합 테이블 자동 이관
+- 과거 데이터 자동 정리
 
 ## 실행 방법
 ```bash
@@ -23,23 +24,54 @@ python main.py --mode db     # 파일 저장 + DB 삽입
 ## 파일 저장 규칙
 - 실행 위치 기준, 오늘 날짜(YYYYMMDD) 폴더 생성
 - 파일명 예시:
-    - Data: `{순서}.data_{stat_title}_{stat_tbl_id}_{yyyy.mm.dd.hhMMss}.json`
-    - Meta: `{순서}.meta_{stat_title}_{stat_tbl_id}_{yyyymmddss}.xml`
-- 같은 데이터의 Data/Meta 파일은 순서 일치
+    - Data: `{순서}-{stat_title}-{from_year}-{to_year}_{yyyyMMddHHmmss}.json`
+    - Meta: `{순서}-{stat_title}-{from_year}-{to_year}_{yyyyMMddHHmmss}.xml`
+    - Latest: `{순서}-{stat_title}-{from_year}-{to_year}_{yyyyMMddHHmmss}.xml`
+- 같은 데이터의 Data/Meta/Latest 파일은 순서 일치
 
 ## DB 연동 정보
-- API 연동 정보: `sys_ext_api_info`, `sys_stats_src_api_info` 테이블에서 조회
-- DB 종류/접속 정보는 `.env` 또는 `config.py`에서 관리
+
+### 조회 대상 테이블
+- `sys_ext_api_info`: 외부 API 정보 조회
+- `sys_stats_src_api_info`: 통계 소스 API 정보 조회  
+- `stats_src_data_info`: 통계 소스 데이터 정보 조회
+
+### 업데이트 대상 테이블
+- `stats_kosis_origin_data`: 원본 데이터 저장
+- `stats_kosis_metadata_code`: 메타데이터 저장
+- `stats_*` (통합 테이블들): 통계별 통합 데이터 저장
+  - 예: `stats_dis_hlth_disease_cost_sub`, `stats_dis_reg_natl_by_new` 등
+- `stats_src_data_info`: 통계 소스 정보 업데이트
+- `sys_data_summary_info`: 시스템 데이터 요약 정보 업데이트
+- `sys_stats_src_api_info`: API 동기화 정보 업데이트
+- `sys_ext_api_info`: 외부 API 동기화 정보 업데이트
+
+### DB 처리 과정
+1. **데이터 수집**: KOSIS API에서 데이터/메타 수집
+2. **원본 저장**: `stats_kosis_origin_data` 테이블에 원본 데이터 저장
+3. **통합 이관**: 통계별 통합 테이블로 데이터 이관
+4. **메타데이터 저장**: `stats_kosis_metadata_code` 테이블에 메타데이터 저장
+5. **정보 업데이트**: 관련 테이블들의 최신화 정보 업데이트
+6. **과거 데이터 정리**: 이전 버전 데이터 자동 삭제
 
 ## 폴더/파일 구조 예시
 ```
 02.kosisDatApiLoader/
 ├── main.py
 ├── db.py
+├── db_processing.py
 ├── kosis_api.py
 ├── file_utils.py
-├── db_insert.py
+├── config.py
 ├── requirements.txt
+├── logs/
+│   ├── 20250925.log
+│   └── db_20250925.log
+├── kosis_data/
+│   └── 20250925/
+│       ├── data/
+│       ├── meta/
+│       └── latest/
 └── README.md
 ```
 
@@ -50,7 +82,16 @@ pip install -r requirements.txt
 
 ## 환경설정
 - DB 접속 정보 등은 `.env` 또는 `config.py`에 설정
+- 병렬 처리 워커 수, 배치 크기 등 성능 관련 설정 가능
+
+## 주요 유의사항
+- **트랜잭션 처리**: DB 처리 중 오류 발생 시 전체 트랜잭션 롤백
+- **데이터 중복 방지**: 동일한 날짜 데이터는 기존 데이터 삭제 후 신규 삽입
+- **과거 데이터 관리**: 자동으로 이전 버전 데이터 정리
+- **에러 처리**: 필수 테이블 누락 시 프로그램 중단
+- **로그 관리**: 실행 로그는 `logs/` 폴더에 날짜별 저장
 
 ## 참고
 - Python 3.8 이상 권장
-- DB 종류: (예시) MySQL, PostgreSQL 등 
+- DB 종류: PostgreSQL 권장
+- 메모리: 대용량 데이터 처리 시 충분한 메모리 필요 

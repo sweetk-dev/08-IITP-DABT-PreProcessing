@@ -85,7 +85,10 @@ def process_single_statistic(session, file_info, api_info, stats_src, stats_data
     # 6. stats_src_data_info 테이블 업데이트
     _update_stats_src_data_info(session, file_info, data_json, latest_date)
 
-    # 7. 관리 테이블(sys_stats_src_api_info, sys_ext_api_info) 최신화
+    # 7. sys_data_summary_info 테이블 업데이트
+    _update_sys_data_summary_info(session, file_info, stats_data_info, latest_date)
+
+    # 8. 관리 테이블(sys_stats_src_api_info, sys_ext_api_info) 최신화
     _update_management_tables(session, file_info, api_info, stats_src, stats_data_info)
 
 def _parse_latest_file_for_latest_date(latest_path):
@@ -384,6 +387,64 @@ def _update_stats_src_data_info(session, file_info, data_json, latest_date):
         }
     )
     logging.info(f"stats_src_data_info({src_data_id}, {stat_tbl_id}) 업데이트 완료: stat_latest_chn_dt={stat_latest_chn_dt}, stat_data_ref_dt={stat_data_ref_dt}, avail_cat_cols={avail_cat_cols}, updated_at={updated_at}, updated_by={updated_by}")
+
+def _update_sys_data_summary_info(session, file_info, stats_data_info, latest_date):
+    """
+    sys_data_summary_info 테이블의 src_latest_chn_dt, sys_data_ref_dt 컬럼 업데이트
+    updated_at도 같이 업데이트
+    """
+    from datetime import date
+    intg_tbl_id = stats_data_info.get('intg_tbl_id')
+    stat_latest_chn_dt = latest_date
+    sys_data_ref_dt = date.today().strftime('%Y-%m-%d')
+    
+    if not intg_tbl_id:
+        logging.warning(f"intg_tbl_id가 없어 sys_data_summary_info 업데이트를 건너뜁니다.")
+        return
+    
+    # sys_data_summary_info에서 해당 레코드가 존재하는지 먼저 확인
+    check_sql = """
+    SELECT COUNT(*) as cnt
+    FROM sys_data_summary_info
+    WHERE sys_tbl_id = :sys_tbl_id AND del_yn = 'N' AND status = 'A'
+    """
+    result = session.execute(text(check_sql), {'sys_tbl_id': intg_tbl_id}).fetchone()
+    
+    if result.cnt == 0:
+        error_msg = f"sys_data_summary_info에서 sys_tbl_id='{intg_tbl_id}'에 해당하는 레코드를 찾을 수 없습니다."
+        logging.error(error_msg)
+        raise ValueError(error_msg)
+    
+    # 업데이트 실행 (updated_at은 CURRENT_TIMESTAMP 사용)
+    update_sql = """
+    UPDATE sys_data_summary_info
+    SET src_latest_chn_dt = :src_latest_chn_dt,
+        sys_data_ref_dt = :sys_data_ref_dt,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE sys_tbl_id = :sys_tbl_id
+      AND del_yn = 'N' 
+      AND status = 'A'
+    """
+    update_result = session.execute(
+        text(update_sql),
+        {
+            'src_latest_chn_dt': stat_latest_chn_dt,
+            'sys_data_ref_dt': sys_data_ref_dt,
+            'sys_tbl_id': intg_tbl_id
+        }
+    )
+    
+    # 업데이트된 행 수 확인
+    rows_affected = update_result.rowcount
+    if rows_affected == 0:
+        error_msg = f"sys_data_summary_info 업데이트 실패: sys_tbl_id='{intg_tbl_id}'에 해당하는 레코드를 업데이트할 수 없습니다."
+        logging.error(error_msg)
+        raise ValueError(error_msg)
+    elif rows_affected > 1:
+        error_msg = f"sys_data_summary_info 업데이트 경고: sys_tbl_id='{intg_tbl_id}'에 해당하는 레코드가 {rows_affected}개 업데이트되었습니다. (예상: 1개)"
+        logging.warning(error_msg)
+    
+    logging.info(f"sys_data_summary_info({intg_tbl_id}) 업데이트 완료: src_latest_chn_dt={stat_latest_chn_dt}, sys_data_ref_dt={sys_data_ref_dt}, updated_rows={rows_affected}")
 
 def _update_management_tables(session, file_info, api_info, stats_src, stats_data_info):
     """
