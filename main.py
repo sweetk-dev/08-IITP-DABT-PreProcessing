@@ -81,7 +81,7 @@ def get_filtered_stats_src_list(data_collection_scope):
         target_id_set = set(item['stat_tbl_id'] for item in env_target_list)
         existing_stat_tbl_ids = {s.get('stat_tbl_id') for s in stats_src_list}
         missing_stat_tbl_ids = target_id_set - existing_stat_tbl_ids
-        logging.info(f"[DEBUG] env target_id_set: {target_id_set}")
+        logging.info(f"[DEBUG] env target_id_set!: {target_id_set}")
         logging.info(f"[DEBUG] DB existing_stat_tbl_ids: {existing_stat_tbl_ids}")
         logging.info(f"[DEBUG] missing_stat_tbl_ids: {missing_stat_tbl_ids}")
         logging.info(f"[DEBUG] stats_src_list(before filter): {stats_src_list}")
