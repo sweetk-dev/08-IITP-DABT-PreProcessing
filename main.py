@@ -105,8 +105,10 @@ def save_single_file(args):
     stat_tbl_id = stats_src['stat_tbl_id']
     src_data_id = data_info.get('src_data_id', 'unknown')
     stat_title = data_info.get('stat_title', 'unknown')
-    from_str = data_info.get('collect_start_dt', 'unknown')
-    to_str = data_info.get('collect_end_dt', 'unknown')
+    _start = data_info.get('collect_start_dt', 'unknown')
+    _end = data_info.get('collect_end_dt', 'unknown')
+    from_str = str(_start)[:4] if str(_start) not in ('unknown', '', 'None') else 'unknown'
+    to_str = str(_end)[:4] if str(_end) not in ('unknown', '', 'None') else 'unknown'
     meta_format = 'xml'
     func_name = 'save_single_file'
     try:
