@@ -8,8 +8,8 @@ from config import get_db_url, get_kosis_sys
 load_dotenv()
 
 DB_URL = get_db_url()
-engine = create_engine(DB_URL)
-Session = sessionmaker(bind=engine)
+engine = create_engine(DB_URL) if DB_URL else None
+Session = sessionmaker(bind=engine) if engine else None
 
 db_logger = logging.getLogger('db')
 
@@ -21,11 +21,12 @@ def set_timezone(dbapi_connection, connection_record):
     cursor.close()
 
 # 엔진에 이벤트 리스너 등록
-try:
-    event.listen(engine, 'connect', set_timezone)
-    db_logger.info("DB 세션 타임존을 Asia/Seoul로 설정했습니다.")
-except Exception as e:
-    db_logger.error(f"DB 타임존 설정 실패: {e}")
+if engine:
+    try:
+        event.listen(engine, 'connect', set_timezone)
+        db_logger.info("DB 세션 타임존을 Asia/Seoul로 설정했습니다.")
+    except Exception as e:
+        db_logger.error(f"DB 타임존 설정 실패: {e}")
 
 def get_api_info():
     db_logger.info("KOSIS API 정보 조회 시작")
@@ -140,16 +141,3 @@ def get_stats_src_data_info(ext_api_id, stat_tbl_id_list):
         session.close()
 
 
-def insert_data_to_db(data_path, meta_path, stats_src):
-    db_logger.info(f"DB Insert Start: {stats_src.get('stat_tbl_id')}")
-    try:
-        # 파일을 읽어 실제 데이터 테이블에 삽입
-        # 예시: 쿼리 실행 로그
-        db_logger.debug(f"Reading data from {data_path}, meta from {meta_path}")
-        # ... SQL 실행 예시 ...
-        # db_logger.info(f"Executing SQL: {sql} Params: {params}")
-        # db_logger.info(f"Rows affected: {rowcount}")
-        db_logger.info(f"DB Insert Success: {stats_src.get('stat_tbl_id')}")
-    except Exception as e:
-        db_logger.error(f"DB Insert Error: {stats_src.get('stat_tbl_id')} - {e}")
-        raise
