@@ -102,6 +102,19 @@ cp .env.example .env
 | `PARALLEL_WORKERS_DB` | — | `2` | 정수 | DB 삽입 병렬 워커 수 |
 | `DATA_COLLECTION_SCOPE` | — | `ALL` | `ALL` `PARTIAL` | 데이터 수집 범위 |
 | `CHECK_DATA_LATEST_DATE_MODE` | — | `OFF` | `ON` `OFF` | KOSIS 최신 변경일 기준 업데이트 여부 |
+### 빠른 시작 예시
+
+```env
+# 최소 필수 설정 (DB_URL 은 반드시 입력)
+DB_URL=postgresql://myuser:mypassword@localhost:5432/iitp_dabt
+
+# 성능 튜닝 (선택)
+PARALLEL_WORKERS_FILE=8
+PARALLEL_WORKERS_DB=4
+DB_BATCH_SIZE=200
+```
+
+> **주의**: `DB_URL` 미설정 시 임포트 단계에서 `create_engine()` 호출로 비정상 종료됩니다 (이슈 #17 참조).
 
 ## 주요 유의사항
 - **트랜잭션 처리**: DB 처리 중 오류 발생 시 전체 트랜잭션 롤백
