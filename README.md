@@ -82,7 +82,7 @@ pip install -r requirements.txt
 
 ## 환경설정
 
-환경 변수는 `.env` 파일로 관리합니다. 프로젝트 루트의 `.env.example`을 복사하여 사용하세요.
+환경 변수는 `.env` 파일로 관리합니다. 
 
 ```bash
 cp .env.example .env
