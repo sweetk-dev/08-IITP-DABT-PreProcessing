@@ -89,6 +89,19 @@ cp .env.example .env
 ```
 
 > `DB_URL`만 필수입니다. 나머지는 기본값이 설정되어 있어 생략 가능합니다.
+### 환경변수 목록
+
+| 변수명 | 필수 | 기본값 | 허용값 | 설명 |
+|--------|:----:|--------|--------|------|
+| `DB_URL` | ✅ | — | `postgresql://...` | PostgreSQL 접속 URL |
+| `DB_BATCH_SIZE` | — | `100` | 정수 | DB 배치 삽입 크기 |
+| `LOG_LEVEL` | — | `INFO` | `DEBUG` `INFO` `WARNING` `ERROR` | 로그 출력 레벨 |
+| `EXT_API_INFO_KOSIS_SYS` | — | `KOSIS` | 문자열 | KOSIS 시스템 구분 코드 |
+| `MAX_KOSIS_API_GET_DATA_CNT` | — | `40000` | 정수 | KOSIS API 1회 최대 조회 건수 |
+| `PARALLEL_WORKERS_FILE` | — | `4` | 정수 | 파일 저장 병렬 워커 수 |
+| `PARALLEL_WORKERS_DB` | — | `2` | 정수 | DB 삽입 병렬 워커 수 |
+| `DATA_COLLECTION_SCOPE` | — | `ALL` | `ALL` `PARTIAL` | 데이터 수집 범위 |
+| `CHECK_DATA_LATEST_DATE_MODE` | — | `OFF` | `ON` `OFF` | KOSIS 최신 변경일 기준 업데이트 여부 |
 
 ## 주요 유의사항
 - **트랜잭션 처리**: DB 처리 중 오류 발생 시 전체 트랜잭션 롤백
