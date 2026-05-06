@@ -2,7 +2,7 @@
 
 > KOSIS(국가통계포털) API 연동 데이터 전처리 모듈
 
-이 문서는 **08-IITP-DABT-PreProcessing** 레포에 기여하는 모든 개발자를 위한 거버넌스 가이드입니다. IITP DABT (정보통신기획평가원 데이터 활용 비즈니스 트랜스포메이션) 국책과제의 일부로 운영되며, **유의적 버전 관리(SemVer)** 표준과 **forward-only** 정책을 따릅니다.
+이 문서는 **08-IITP-DABT-PreProcessing** 레포에 기여하는 모든 개발자를 위한 거버넌스 가이드입니다.  **유의적 버전 관리(SemVer)** 표준과 **forward-only** 정책을 따릅니다.
 
 ---
 
@@ -166,21 +166,8 @@ git push origin v1.1.0
 
 ---
 
-## 7. 활동성 운영 권장사항 (참고)
-
-이 프로젝트는 IITP 국책과제이며, GitHub 활동성이 평가에 반영됩니다. 다음을 권장합니다.
-
-- **이슈**: 작업 단위마다 이슈 생성 (목표: 레포당 50개 이상)
-- **이슈 close 비율**: PR 본문 `Closes #N` 활용 (목표: 20개 이상 close)
-- **라벨 일관성**: §2-3 라벨 표 따름
-- **유지 기간**: 레포 생성일로부터 24개월 이상 유지
-
----
-
-## 8. 문의
+## 7. 문의
 
 이 레포 관련 문의는 GitHub Issues 로 등록하거나, Owner 에게 문의 바랍니다.
 
 ---
-
-> 이 문서는 IITP DABT 프로젝트 공통 거버넌스 템플릿(`.claude/templates/CONTRIBUTING.md.template`) 을 기반으로 작성되었습니다. 정책 갱신은 워크스페이스 `.claude/rules/versioning.md`, `.claude/rules/branch-policy.md` 를 기준으로 동기화됩니다.
