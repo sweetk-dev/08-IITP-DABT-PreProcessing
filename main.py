@@ -5,7 +5,7 @@ import sys
 import json
 from datetime import datetime, date
 from file_utils import save_data_and_meta_files, save_meta_file, save_latest_file, save_data_file
-from db import get_db_url, get_api_info, get_stats_src_api_info, insert_data_to_db, get_stats_src_data_info
+from db import get_db_url, get_api_info, get_stats_src_api_info, get_stats_src_data_info
 from kosis_api import fetch_kosis_data, fetch_kosis_meta, fetch_kosis_latest
 from config import load_target_src_tbl_id_list, get_log_level, get_data_collection_scope, get_parallel_workers_file
 from db_processing import process_db_insertion
