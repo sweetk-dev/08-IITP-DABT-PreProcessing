@@ -5,21 +5,25 @@ import logging
 
 load_dotenv()
 
-#ENV Info
+# --- DB 연결 설정 ---
 _DB_URL = os.getenv('DB_URL')
-_LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 _DB_BATCH_SIZE = int(os.getenv('DB_BATCH_SIZE', '100'))
+
+# --- 로깅 설정 ---
+_LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+
+# --- KOSIS API 설정 ---
 _EXT_API_INFO_KOSIS_SYS = os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS')
+_MAX_KOSIS_API_GET_DATA_CNT = int(os.getenv('MAX_KOSIS_API_GET_DATA_CNT', '40000'))
+_KOSIS_SYS = os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS').upper()
+
+# --- 병렬처리 성능 설정 ---
 _PARALLEL_WORKERS_FILE = int(os.getenv('PARALLEL_WORKERS_FILE', '4'))
 _PARALLEL_WORKERS_DB = int(os.getenv('PARALLEL_WORKERS_DB', '2'))
-_MAX_KOSIS_API_GET_DATA_CNT = int(os.getenv('MAX_KOSIS_API_GET_DATA_CNT', '40000'))
 
-# Data option
-_KOSIS_SYS = os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS').upper()
+# --- 데이터 수집 옵션 ---
 _DATA_COLLECTION_SCOPE = os.getenv('DATA_COLLECTION_SCOPE', 'ALL').upper()
 _CHECK_DATA_LATEST_DATE_MODE = os.getenv('CHECK_DATA_LATEST_DATE_MODE', 'OFF').upper()
-
-
 
 
 def get_db_url():
@@ -85,26 +89,26 @@ def _parse_env_file_directly(env_path):
     """섹션 헤더가 없는 .env 파일을 직접 파싱하여 TARGET_SRC_TBL_ID_LIST 섹션의 값들을 추출"""
     target_ids = []
     in_target_section = False
-    
+
     try:
         with open(env_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                
+
                 if line == '[TARGET_SRC_TBL_ID_LIST]':
                     in_target_section = True
                     continue
-                
+
                 if in_target_section:
                     if line.startswith('[') and line.endswith(']'):
                         # 새로운 섹션 시작
                         break
                     if line:
                         target_ids.append(line)
-        
+
         return target_ids
     except Exception as e:
         logging.error(f".env 파일 파싱 실패: {e}")
-        return [] 
+        return []
