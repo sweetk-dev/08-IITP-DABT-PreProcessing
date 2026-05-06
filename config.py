@@ -17,7 +17,7 @@ _MAX_KOSIS_API_GET_DATA_CNT = int(os.getenv('MAX_KOSIS_API_GET_DATA_CNT', '40000
 # Data option
 _KOSIS_SYS = os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS').upper()
 _DATA_COLLECTION_SCOPE = os.getenv('DATA_COLLECTION_SCOPE', 'ALL').upper()
-_CHCEK_DATA_LATEST_DATE_MODE = os.getenv('CHCEK_DATA_LATEST_DATE', '20250624').upper()
+_CHECK_DATA_LATEST_DATE_MODE = os.getenv('CHECK_DATA_LATEST_DATE_MODE', 'OFF').upper()
 
 
 
@@ -38,7 +38,17 @@ def get_data_collection_scope():
     return _DATA_COLLECTION_SCOPE
 
 def get_check_data_latest_date_mode():
-    return _CHCEK_DATA_LATEST_DATE_MODE
+    """
+    KOSIS 최신 변경일 기준 업데이트 여부 체크 모드를 반환합니다.
+
+    반환값:
+        - 'ON' : KOSIS 최종 변경일이 내부 기록보다 최신인 경우에만 DB 업데이트
+        - 'OFF': 항상 DB 업데이트 (기본값)
+
+    .env 설정 키: CHECK_DATA_LATEST_DATE_MODE=ON 또는 OFF
+    사용 위치: db_processing.py process_single_statistic() (구현 예정)
+    """
+    return _CHECK_DATA_LATEST_DATE_MODE
 
 
 def get_parallel_workers_file():
