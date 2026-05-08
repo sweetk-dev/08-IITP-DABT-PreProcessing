@@ -93,12 +93,28 @@ def process_single_statistic(session, file_info, api_info, stats_src, stats_data
 
 def _parse_latest_file_for_latest_date(latest_path):
     """
-    latest xml 파일에서 SendDe 중 가장 최신 날짜(YYYY-MM-DD)를 추출
+    latest 파일에서 SendDe 중 가장 최신 날짜(YYYY-MM-DD)를 추출.
+    파일 확장자(.json / .xml)에 따라 적절한 파서를 사용한다.
     """
-    tree = ET.parse(latest_path)
-    root = tree.getroot()
-    send_de_list = [row.findtext('SendDe') for row in root.findall('.//MetaRow') if row.findtext('SendDe')]
-    # YYYY-MM-DD 형식으로 변환 (예: 2024-12-30)
+    send_de_list = []
+    if latest_path.endswith('.json'):
+        with open(latest_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    val = item.get('SendDe')
+                    if val:
+                        send_de_list.append(val)
+        elif isinstance(data, dict):
+            val = data.get('SendDe')
+            if val:
+                send_de_list.append(val)
+    else:
+        tree = ET.parse(latest_path)
+        root = tree.getroot()
+        send_de_list = [row.findtext('SendDe') for row in root.findall('.//MetaRow') if row.findtext('SendDe')]
+    # YYYY-MM-DD 형식 (예: 2024-12-30)
     send_de_list = [d for d in send_de_list if d]
     if not send_de_list:
         return None
