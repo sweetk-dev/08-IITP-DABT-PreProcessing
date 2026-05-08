@@ -50,11 +50,11 @@ def fetch_kosis_data_single(api_info, stats_src, stats_src_data_info, from_year,
         if response.status_code != 200:
             logging.error(f'KOSIS data API 요청 실패: status={response.status_code}, url={url}, response={response.text[:200]}')
             print(f"[ERROR] KOSIS data API 요청 실패: status={response.status_code}, url={url}")
-            import sys; sys.exit(1)
+            raise RuntimeError("KOSIS API 요청 실패")
     except Exception as e:
         logging.error(f'KOSIS data API 요청 중 예외 발생: {e}', exc_info=True)
         print(f"[ERROR] KOSIS data API 요청 중 예외 발생: {e}")
-        import sys; sys.exit(1)
+        raise RuntimeError("KOSIS API 처리 중단")
     
     if file_format == 'json':
         return response.json()
@@ -69,7 +69,7 @@ def fetch_kosis_data_split(api_info, stats_src, stats_src_data_info, from_year, 
     all_data = []
     year_gap = to_year - from_year + 1
     
-    while year_gap > 1:  # 1년 초과 시에만 분할
+    if year_gap > 1:  # 1년 초과 시에만 분할
         mid_year = from_year + (year_gap // 2)
         
         # 전반부 수집
@@ -101,7 +101,7 @@ def fetch_kosis_data_split(api_info, stats_src, stats_src_data_info, from_year, 
     if is_error_31(response):
         logging.error(f"Error 31: 1년 단위({from_year}~{to_year})에서도 데이터 수집 실패")
         print(f"[ERROR] KOSIS API Error 31: 1년 단위({from_year}~{to_year})에서도 데이터 수집 실패")
-        import sys; sys.exit(1)
+        raise RuntimeError("KOSIS API 처리 중단")
     
     return response if isinstance(response, list) else [response]
 
@@ -132,11 +132,11 @@ def fetch_kosis_meta(api_info, stats_src, stats_src_data_info):
         if response.status_code != 200:
             logging.error(f'KOSIS meta API 요청 실패: status={response.status_code}, url={url}, response={response.text[:200]}')
             print(f"[ERROR] KOSIS meta API 요청 실패: status={response.status_code}, url={url}")
-            import sys; sys.exit(1)
+            raise RuntimeError("KOSIS API 요청 실패")
     except Exception as e:
         logging.error(f'KOSIS meta API 요청 중 예외 발생: {e}', exc_info=True)
         print(f"[ERROR] KOSIS meta API 요청 중 예외 발생: {e}")
-        import sys; sys.exit(1)
+        raise RuntimeError("KOSIS API 처리 중단")
     if file_format == 'json':
         return response.json()
     else:
@@ -152,11 +152,11 @@ def fetch_kosis_latest(api_info, stats_src, stats_src_data_info):
         if response.status_code != 200:
             logging.error(f'KOSIS latest API 요청 실패: status={response.status_code}, url={url}, response={response.text[:200]}')
             print(f"[ERROR] KOSIS latest API 요청 실패: status={response.status_code}, url={url}")
-            import sys; sys.exit(1)
+            raise RuntimeError("KOSIS API 요청 실패")
     except Exception as e:
         logging.error(f'KOSIS latest API 요청 중 예외 발생: {e}', exc_info=True)
         print(f"[ERROR] KOSIS latest API 요청 중 예외 발생: {e}")
-        import sys; sys.exit(1)
+        raise RuntimeError("KOSIS API 처리 중단")
     if file_format == 'json':
         return response.json()
     else:
