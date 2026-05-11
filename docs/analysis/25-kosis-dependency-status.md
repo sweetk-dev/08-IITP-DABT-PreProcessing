@@ -146,5 +146,74 @@ fetch_kosis_data()
 
 3개 엔드포인트 모두 `sys_stats_src_api_info` 테이블의 JSON 컬럼에 URL 템플릿으로 저장되어 있으며,
 다른 API 소스는 동일한 컬럼 구조를 가져야 호환이 가능합니다.
+### 2.3 main.py
+
+`main.py`는 데이터 수집의 진입점으로, KOSIS 전용 모듈들을 직접 import하고
+수집 흐름 전체를 조율합니다.
+
+#### 2.3.1 KOSIS 관련 import 구조
+
+```python
+# main.py 상단 import 선언
+from db import get_db_url, get_api_info, get_stats_src_api_info, get_stats_src_data_info
+from kosis_api import fetch_kosis_data, fetch_kosis_meta, fetch_kosis_latest
+from config import load_target_src_tbl_id_list, get_log_level, get_data_collection_scope, get_parallel_workers_file
+```
+
+KOSIS 관련 함수 3개(`fetch_kosis_data`, `fetch_kosis_meta`, `fetch_kosis_latest`)가
+모두 `kosis_api` 모듈에서 직접 import됩니다. 추상화 계층 없이 구현에 직접 결합되어 있습니다.
+
+#### 2.3.2 호출 진입점 함수별 KOSIS 의존 현황
+
+| 함수 | KOSIS 의존 방식 | 세부 내용 |
+|------|----------------|-----------|
+| `check_required_env_and_args()` | `config.get_db_url()` | DB_URL 미설정 시 `sys.exit(1)` |
+| `get_filtered_stats_src_list()` | `get_api_info()` → KOSIS `ext_sys='KOSIS'` 조회 | 수집 대상 목록 구성 전체가 KOSIS API 정보 기반 |
+| `save_single_file(args)` | `fetch_kosis_meta`, `fetch_kosis_latest`, `fetch_kosis_data` 직접 호출 | 통계소스 1건당 3개 KOSIS 엔드포인트 순차 호출 |
+| `save_all_files(...)` | `save_single_file` 병렬 실행 | ThreadPoolExecutor로 병렬화, 내부는 동일 KOSIS 의존 |
+| `main()` | 위 모든 함수 순차 호출 | KOSIS → 파일 → (선택) DB 삽입 전체 흐름 |
+
+#### 2.3.3 저장 경로 패턴 (KOSIS 전용 디렉터리 구조)
+
+```python
+# main.py: create_data_save_directory()
+data_root = "kosis_data"          # 최상위 디렉터리명에 'kosis' 고정
+root_dir  = os.path.join(data_root, today_str)
+data_dir  = os.path.join(root_dir, "data")
+meta_dir  = os.path.join(root_dir, "meta")
+latest_dir = os.path.join(root_dir, "latest")
+```
+
+저장 디렉터리명 `kosis_data/`가 KOSIS에 하드코딩되어 있습니다.
+다중 소스 지원 시 소스별로 디렉터리를 분리해야 합니다 (예: `ext_data/<source>/<date>/`).
+
+#### 2.3.4 `save_single_file()` 호출 흐름
+
+```
+save_single_file(api_info, stats_src, dirs, data_info)
+    │
+    ├─ fetch_kosis_meta(api_info, stats_src, data_info)
+    │       └─ build_kosis_url(..., 'api_meta_url')   → GET 요청
+    │
+    ├─ fetch_kosis_latest(api_info, stats_src, data_info)
+    │       └─ build_kosis_url(..., 'api_latest_chn_dt_url') → GET 요청
+    │
+    └─ fetch_kosis_data(api_info, stats_src, data_info)
+            └─ fetch_kosis_data_with_retry(...)
+                 └─ fetch_kosis_data_single / fetch_kosis_data_split (재귀)
+```
+
+통계소스 1건 처리 시 최소 3회, Error 31 발생 시 추가 분할 요청으로 KOSIS 서버에 의존합니다.
+
+#### 2.3.5 config.py KOSIS 설정값 핫스팟 (참고)
+
+`config.py`에는 `main.py`와 `db.py`에서 직접 참조되는 KOSIS 전용 환경변수 4개가 있습니다.
+
+| 환경변수 키 | 기본값 | 사용처 |
+|-------------|--------|--------|
+| `EXT_API_INFO_KOSIS_SYS` | `'KOSIS'` | `db.py: EXT_SYS_KOSIS` — DB 조회 조건 |
+| `MAX_KOSIS_API_GET_DATA_CNT` | `40000` | (현재 `kosis_api.py`에서 미사용, 설정값으로만 존재) |
+| `DATA_COLLECTION_SCOPE` | `'ALL'` | `main.py: get_filtered_stats_src_list()` |
+| `CHECK_DATA_LATEST_DATE_MODE` | `'OFF'` | `db_processing.py` 연동 예정 |
 
 
