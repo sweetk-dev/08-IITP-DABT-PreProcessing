@@ -346,7 +346,89 @@ KOSIS_RETRY_COUNT=3
 
 ## 5. 마이그레이션 플랜
 
-*다음 commit 에서 채워집니다.*
+본 절은 KOSIS-only 구조에서 멀티 소스 구조로 전환하는 단계별 절차를 정의합니다. 설계 목표 G2 (후방호환 보장) 를 충족합니다.
+
+### 5.1 전체 마이그레이션 단계
+
+```
+[현재] KOSIS-only (분석 #25 §2 인벤토리)
+   │
+   ▼
+[1단계] DB·설정 일반화 (이슈 #28 예정)
+   │   • db.get_api_info() 에 ext_sys default='KOSIS' 추가
+   │   • config.py 에 get_enabled_ext_sys_list() / get_ext_sys_config() 추가
+   │   • 후방호환 wrapper 유지 → 기존 호출부 동작 변경 없음
+   │
+   ▼
+[2단계] Collector 어댑터 추출 (이슈 #27 예정)
+   │   • trader/collectors/base.py 의 BaseCollector 작성
+   │   • trader/collectors/kosis.py 의 KosisCollector 작성
+   │   • kosis_api.py 의 기존 함수 → thin wrapper 로 전환
+   │   • main.py 의 직접 호출 → Collector 라우팅 분기로 전환
+   │
+   ▼
+[3단계] 저장 경로 분기 (이슈 #27 후반 또는 #28 내)
+   │   • create_data_save_directory() 에 ext_sys 파라미터 추가
+   │   • kosis_data/ → ext_data/<ext_sys>/<date>/ 전환
+   │   • 후방호환: 환경변수 'LEGACY_SAVE_DIR=on' 시 'kosis_data/' 유지
+   │
+   ▼
+[4단계] 신규 소스 어댑터 추가 (이슈 #29 예정)
+   │   • trader/collectors/data_go_kr.py 의 DataGoKrCollector 작성
+   │   • DB 에 ext_sys='DATA_GO_KR' row 추가 (§3.5 SQL)
+   │   • .env 에 ENABLED_EXT_SYS_LIST='KOSIS,DATA_GO_KR' 설정
+   │   • 별도 PR 로 검증 — main.py 변경 없이 어댑터 추가만으로 신규 소스 활성화
+   │
+   ▼
+[완료] 멀티 소스 구조 — 신규 소스 1건 = 어댑터 1파일 + DB row 1건 + .env 키 5개
+```
+
+### 5.2 단계별 후방호환 보장 체크리스트
+
+| 단계 | KOSIS 수집 정상 동작 | 기존 `.env` 호환 | 기존 DB 데이터 호환 | 롤백 가능성 |
+|---|:---:|:---:|:---:|:---:|
+| 1단계 | ✅ (default 'KOSIS') | ✅ (wrapper) | ✅ | ✅ revert 1 PR |
+| 2단계 | ✅ (thin wrapper) | ✅ | ✅ | ✅ revert 1 PR |
+| 3단계 | ✅ (LEGACY_SAVE_DIR fallback) | ✅ | ✅ | ✅ env 변경 |
+| 4단계 | ✅ (KOSIS 영향 없음) | ✅ (DATA_GO_KR_ENABLED=false 가능) | ✅ | ✅ row 비활성화 |
+
+### 5.3 핫스팟별 단계 매핑
+
+분석 #25 §3.2 의 8개 핫스팟이 각 단계에서 처리되는 매핑:
+
+| 핫스팟 | 위치 | 처리 단계 | 처리 방식 |
+|---|---|:---:|---|
+| H1 | `config.py:15` 환경변수 하드코딩 | 1단계 | `get_ext_sys_config()` 도입, `EXT_API_INFO_KOSIS_SYS` 후방호환 유지 |
+| H2 | `db.py:18` `EXT_SYS_KOSIS` 모듈 상수 | 1단계 ~ 2단계 | 단계적 제거 (§3.4 참조) |
+| H3 | `db.py:44` `fetchone()` | 1단계 | `ext_sys` 파라미터 추가, fetchone 패턴 유지 (§3.3.1) |
+| H4 | `kosis_api.py` 전체 함수 시그니처 | 2단계 | `KosisCollector` 내부로 이동, 기존 함수는 wrapper |
+| H5 | `kosis_api.py:is_error_31()` | 2단계 | `KosisCollector.is_retryable_error()` 로 이동 |
+| H6 | `main.py:import` 직접 결합 | 2단계 | Collector 라우팅 분기로 전환 |
+| H7 | `main.py: data_root='kosis_data'` | 3단계 | `ext_data/<ext_sys>/<date>/` 로 전환 |
+| H8 | `main.py:save_single_file()` 3개 호출 | 2단계 | Collector 메서드 호출로 전환 |
+
+### 5.4 마이그레이션 중 단위 동작 보장
+
+각 단계 PR 머지 후 다음 동작이 보장되어야 합니다.
+
+| 동작 | 보장 시점 | 검증 방법 |
+|---|---|---|
+| `python main.py --mode file` 정상 동작 | 1단계 직후 ~ 완료 | smoke test (1개 통계표 수집) |
+| `python main.py --mode db` 정상 동작 | 1단계 직후 ~ 완료 | smoke test (db_processing 분기) |
+| 기존 `.env` 그대로 사용 가능 | 1단계 직후 ~ 완료 | `.env` 변경 없이 수집 성공 |
+| 기존 `kosis_data/` 경로 사용 가능 | 3단계 전 / `LEGACY_SAVE_DIR=on` 시 후 | 디렉터리 비교 |
+
+### 5.5 마이그레이션 일정 (권장)
+
+| 단계 | 이슈 | 작업량 (예상) | 의존성 |
+|---|---|---|---|
+| 1단계 | #28 | minor (~200 lines) | 없음 |
+| 2단계 | #27 | minor (~400 lines) | 1단계 머지 후 |
+| 3단계 | #27 후반 또는 #28 내 | patch (~80 lines) | 2단계와 같이 또는 직후 |
+| 4단계 | #29 | minor (~150 lines, 어댑터 단일 파일) | 2단계 머지 후 |
+
+> #27 과 #28 의 순서는 운영자 판단 — 본 설계는 "DB·설정 일반화 먼저, 그 위에 Collector 어댑터" 순서를 권장. 단 #27 을 먼저 머지해도 후방호환 wrapper 가 작동하므로 차단 의존성은 아님.
+
 
 ---
 
