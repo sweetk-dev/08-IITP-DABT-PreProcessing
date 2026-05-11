@@ -73,6 +73,7 @@ def check_required_env_and_args(args):
         sys.exit(1)
 
 def get_filtered_stats_src_list(data_collection_scope):
+    # default ext_sys='KOSIS' 사용 (이슈 #27 후방호환 — 인자 미지정 시 KOSIS 경로)
     api_info = get_api_info()
     stats_src_list = get_stats_src_api_info(api_info.get('ext_api_id'))
     env_target_list = None
