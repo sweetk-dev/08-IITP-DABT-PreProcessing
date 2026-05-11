@@ -147,7 +147,95 @@ def fetch_kosis_meta(api_info, stats_src, data_info):
 
 ## 3. DB 스키마 확장
 
-*다음 commit 에서 채워집니다.*
+본 절은 멀티 소스 지원을 위한 DB 스키마 변경안을 정의합니다. 설계 목표 G3 (스키마 변경 최소화) 를 충족합니다.
+
+### 3.1 변경 원칙
+
+| 원칙 | 설명 |
+|---|---|
+| **기존 컬럼 활용** | `sys_ext_api_info.ext_sys` 컬럼이 이미 존재 — 새 컬럼 추가 없이 활용 |
+| **default 'KOSIS'** | 기존 행은 `ext_sys='KOSIS'` 로 가정 — 후방호환 |
+| **신규 행 추가 방식** | 신규 소스는 `ext_sys='DATA_GO_KR'` 등으로 row 추가 |
+| **마이그레이션 SQL** | 데이터 백필 1회 + 인덱스 추가 (필요 시) |
+
+### 3.2 영향받는 테이블 — `sys_ext_api_info`
+
+분석 #25 §2.1.2 표에서 식별된 KOSIS 의존 함수 `get_api_info()` 의 SQL 조건이 본 스키마와 직접 결합합니다.
+
+| 컬럼 | 기존 | 변경 후 | 비고 |
+|---|---|---|---|
+| `ext_api_id` | PK | (변경 없음) | |
+| `ext_sys` | varchar (값: 'KOSIS') | varchar (값: 'KOSIS' / 'DATA_GO_KR' / ...) | **소스 구분자** |
+| `ext_url` | varchar | (변경 없음) | base URL |
+| `auth` | varchar | (변경 없음) | 인증키 |
+| `data_format` | varchar | (변경 없음) | 기본 응답 형식 |
+| `del_yn`, `status` | char | (변경 없음) | 조회 조건 |
+
+> **인덱스 추가 권장**: `idx_sys_ext_api_info_ext_sys ON sys_ext_api_info(ext_sys, del_yn, status)` — `get_api_info()` 조회 성능 보장.
+
+### 3.3 `db.py` 함수 시그니처 변경안
+
+분석 #25 §2.1.2 표의 3개 함수 시그니처를 다음과 같이 일반화합니다.
+
+#### 3.3.1 `get_api_info()` — `ext_sys` 파라미터 추가
+
+```python
+# db.py (변경 후)
+def get_api_info(ext_sys: str = 'KOSIS') -> dict:
+    """외부 API 정보 1건 조회.
+
+    ext_sys: 'KOSIS' / 'DATA_GO_KR' / ... (default 'KOSIS' — 후방호환)
+    반환: 단건 dict (분석 #25 §2.1.4 의 키 구조 그대로 유지)
+    """
+    query = text("""
+        SELECT ext_api_id, if_name, ext_sys, ext_url, auth, data_format, ...
+        FROM sys_ext_api_info
+        WHERE ext_sys = :ext_sys AND del_yn = 'N' AND status = 'A'
+    """)
+    result = session.execute(query, {'ext_sys': ext_sys})
+    row = result.fetchone()  # 분석 #25 §2.1.3 의 fetchone() 패턴 유지 — 소스당 1건 가정 변경 X
+    return dict(row._mapping) if row else None
+```
+
+**후방호환**: `ext_sys` 가 default='KOSIS' 이므로 기존 호출부 `get_api_info()` 는 변경 없이 동작.
+
+> ⚠️ **fetchone() 패턴 유지 결정**: 분석 #25 §4.1 에서 `fetchone()` 의 "복수 API 소스 등록 시 첫 행만 사용" 문제가 지적되었으나, 본 설계에서는 **소스당 단건** 정책을 유지합니다 (소스별 row 1개, ext_sys 로 라우팅). 향후 동일 소스의 복수 등록이 필요할 경우 별도 이슈로 분리.
+
+#### 3.3.2 `get_stats_src_api_info(ext_api_id)` — 변경 없음
+
+분석 #25 §2.1.2 표 그대로 `ext_api_id` 파라미터만 받으므로 소스 일반화 영향 없음. 시그니처 유지.
+
+#### 3.3.3 `get_stats_src_data_info(ext_api_id, stat_tbl_id_list)` — 변경 없음
+
+마찬가지로 `ext_api_id` 기반이므로 소스 일반화 영향 없음. 시그니처 유지.
+
+### 3.4 `EXT_SYS_KOSIS` 모듈 상수 처리 (H2 핫스팟)
+
+분석 #25 §3.2 의 H2 핫스팟 — `db.py` 의 모듈 레벨 상수 `EXT_SYS_KOSIS = get_kosis_sys()` 는 다음과 같이 처리합니다.
+
+| 시점 | 처리 |
+|---|---|
+| 구현 #27 직후 | 모듈 상수 유지 (후방호환 wrapper 가 default 로 사용) |
+| 구현 #28 완료 후 | 모듈 상수 제거 검토 — `config.py` 의 `get_ext_sys_list()` 가 대체 |
+| 신규 소스 #29 추가 시 | `config.get_ext_sys_list()` 가 반환하는 리스트로 루프 — 모듈 상수 의존 사라짐 |
+
+### 3.5 마이그레이션 SQL 스크립트 (참고)
+
+```sql
+-- 기존 KOSIS 행 명시 (이미 ext_sys='KOSIS' 라면 no-op)
+UPDATE sys_ext_api_info SET ext_sys = 'KOSIS' WHERE ext_sys IS NULL OR ext_sys = '';
+
+-- 인덱스 추가
+CREATE INDEX IF NOT EXISTS idx_sys_ext_api_info_ext_sys
+    ON sys_ext_api_info (ext_sys, del_yn, status);
+
+-- 신규 소스 행 추가 예시 (#29 에서 실행)
+INSERT INTO sys_ext_api_info (ext_sys, if_name, ext_url, auth, data_format, del_yn, status, ...)
+VALUES ('DATA_GO_KR', '공공데이터포털', 'https://api.data.go.kr/...', 'API_KEY_HERE', 'json', 'N', 'A', ...);
+```
+
+> 본 SQL 은 설계 참고용 — 실제 마이그레이션은 #28 PR 에서 검토·실행.
+
 
 ---
 
