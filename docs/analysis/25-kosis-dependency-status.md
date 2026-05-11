@@ -215,5 +215,80 @@ save_single_file(api_info, stats_src, dirs, data_info)
 | `MAX_KOSIS_API_GET_DATA_CNT` | `40000` | (현재 `kosis_api.py`에서 미사용, 설정값으로만 존재) |
 | `DATA_COLLECTION_SCOPE` | `'ALL'` | `main.py: get_filtered_stats_src_list()` |
 | `CHECK_DATA_LATEST_DATE_MODE` | `'OFF'` | `db_processing.py` 연동 예정 |
+---
+
+## 3. 데이터 흐름과 의존 핫스팟
+
+### 3.1 전체 데이터 흐름도
+
+```
+[.env / DB]
+    │
+    ├─ config.py ─── EXT_API_INFO_KOSIS_SYS='KOSIS'
+    │                MAX_KOSIS_API_GET_DATA_CNT=40000
+    │
+    └─ db.py
+         │
+         ├─ get_api_info()
+         │    SQL: sys_ext_api_info WHERE ext_sys='KOSIS'
+         │    → api_info { ext_api_id, ext_url, auth, ... }
+         │
+         ├─ get_stats_src_api_info(ext_api_id)
+         │    SQL: sys_stats_src_api_info WHERE ext_api_id=<KOSIS ID>
+         │    → stats_src_list [ { stat_tbl_id, api_data_url, api_meta_url, ... } ]
+         │
+         └─ get_stats_src_data_info(ext_api_id, stat_tbl_id_list)
+              SQL: stats_src_data_info WHERE ext_api_id=<KOSIS ID>
+              → { stat_tbl_id → { collect_start_dt, collect_end_dt, ... } }
+
+                          ↓ (api_info + stats_src + data_info)
+
+main.py: save_all_files() [ThreadPoolExecutor]
+    └─ save_single_file() ×N (통계소스 건수)
+         │
+         ├─ kosis_api.fetch_kosis_meta()
+         │    build_kosis_url(..., 'api_meta_url')
+         │    → GET https://kosis.kr/openapi/... → 메타 파일 저장
+         │
+         ├─ kosis_api.fetch_kosis_latest()
+         │    build_kosis_url(..., 'api_latest_chn_dt_url')
+         │    → GET https://kosis.kr/openapi/... → latest 파일 저장
+         │
+         └─ kosis_api.fetch_kosis_data()
+              fetch_kosis_data_with_retry()
+                └─ fetch_kosis_data_single() → GET https://kosis.kr/openapi/...
+                     Error 31? → fetch_kosis_data_split() [재귀]
+              → 데이터 파일 저장
+
+                          ↓ (--mode db 시)
+
+db_processing.process_db_insertion()
+    → 파일 파싱 → DB 삽입
+```
+
+### 3.2 단일 소스 가정이 박힌 위치 (핫스팟 목록)
+
+| # | 위치 | 코드/SQL | 의존 유형 | 심각도 |
+|---|------|---------|-----------|:------:|
+| H1 | `config.py:15` | `_EXT_API_INFO_KOSIS_SYS = os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS')` | 환경변수 기본값 하드코딩 | 중 |
+| H2 | `db.py:18` | `EXT_SYS_KOSIS = get_kosis_sys()` | 모듈 레벨 상수 — 런타임 변경 불가 | 높음 |
+| H3 | `db.py:44` | `WHERE ext_sys = :ext_sys` + `fetchone()` | 단일 API 소스만 조회 가능 | 높음 |
+| H4 | `kosis_api.py` 전체 | 모든 함수 시그니처: `(api_info, stats_src, stats_src_data_info)` | KOSIS 전용 딕셔너리 구조 의존 | 높음 |
+| H5 | `kosis_api.py:is_error_31()` | `response.get('err') == '31'` | KOSIS 전용 오류 코드 | 중 |
+| H6 | `main.py:import` | `from kosis_api import ...` | 구현 직접 결합, 추상화 없음 | 높음 |
+| H7 | `main.py:create_data_save_directory()` | `data_root = "kosis_data"` | 저장 경로에 소스명 하드코딩 | 중 |
+| H8 | `main.py:save_single_file()` | `fetch_kosis_meta`, `fetch_kosis_latest`, `fetch_kosis_data` 직접 호출 | 3개 엔드포인트 패턴이 KOSIS 전용 | 높음 |
+
+### 3.3 다중 소스 연동 시 영향 범위 추정
+
+현재 구조에서 새 데이터 소스(예: 공공데이터포털)를 추가하려면 수정이 필요한 파일과 범위:
+
+| 파일 | 수정 필요 이유 | 예상 난이도 |
+|------|--------------|:-----------:|
+| `config.py` | 소스별 환경변수 구조화 | 낮음 |
+| `db.py` | `fetchone()` → `fetchall()`, `ext_sys` 파라미터화 | 중간 |
+| `kosis_api.py` | 소스 독립적 클라이언트 인터페이스 추출 또는 래퍼 분리 | 높음 |
+| `main.py` | import 추상화, 저장 경로 소스별 분리, 흐름 제어 범용화 | 높음 |
+| `db_processing.py` | 파일 파싱 로직 소스별 분기 (JSON/XML 이미 일부 지원) | 중간 |
 
 
