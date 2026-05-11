@@ -58,7 +58,90 @@
 
 ## 2. BaseCollector 추상화
 
-*다음 commit 에서 채워집니다.*
+본 절은 외부 API 소스 추가의 핵심 추상화인 `BaseCollector` 인터페이스를 정의합니다.
+설계 목표 G1 (플러그인식 추가) 과 G2 (후방호환) 를 충족합니다.
+
+### 2.1 클래스 계층 구조
+
+```
+BaseCollector (abstract)
+    │
+    ├─ KosisCollector(BaseCollector)        ← 기존 kosis_api.py 함수들을 래핑
+    ├─ DataGoKrCollector(BaseCollector)     ← 공공데이터포털 (향후 #29)
+    └─ <NewSource>Collector(BaseCollector)  ← 신규 소스
+```
+
+### 2.2 BaseCollector 인터페이스 시그니처
+
+```python
+# trader/collectors/base.py (신규)
+from abc import ABC, abstractmethod
+from typing import Any
+
+class BaseCollector(ABC):
+    """외부 API 소스 수집기 공통 인터페이스.
+
+    구현체는 ext_sys 식별자(예: 'KOSIS', 'DATA_GO_KR') 를 클래스 속성으로 가집니다.
+    """
+
+    EXT_SYS: str  # 구현체에서 'KOSIS' 등으로 설정
+
+    def __init__(self, api_info: dict, stats_src: dict):
+        """
+        api_info: db.get_api_info(ext_sys) 가 반환한 단건 dict
+        stats_src: db.get_stats_src_api_info(ext_api_id) 결과 1행
+        """
+        self.api_info = api_info
+        self.stats_src = stats_src
+
+    @abstractmethod
+    def fetch_meta(self, data_info: dict) -> dict | str:
+        """통계표 메타정보 조회. 응답을 dict (JSON) 또는 str (텍스트) 로 반환."""
+
+    @abstractmethod
+    def fetch_latest(self, data_info: dict) -> dict | str:
+        """통계표 최신 변경일 조회."""
+
+    @abstractmethod
+    def fetch_data(self, data_info: dict) -> dict | list | str:
+        """실제 통계 데이터 조회. 소스 고유 재시도/분할 로직은 구현체 내부에서 처리."""
+
+    @abstractmethod
+    def is_retryable_error(self, response: Any) -> bool:
+        """소스별 재시도 가능 오류 판별 (KOSIS Error 31 등)."""
+
+    # --- 공통 유틸 ---
+    def save_response(self, response, save_dir: str, filename: str) -> str:
+        """응답을 파일로 저장 (소스별 동일 동작). 반환: 저장된 절대경로."""
+        # 구현체에서 override 불필요 — 공통 구현
+        ...
+```
+
+### 2.3 책임 경계
+
+| 항목 | BaseCollector (공통) | 구현체 (예: KosisCollector) |
+|---|---|---|
+| 파일 저장 | ✅ `save_response()` | — |
+| URL 빌드 | — | ✅ 내부 helper |
+| 인증키 주입 | — | ✅ 내부 helper |
+| 재시도/분할 로직 | — | ✅ `fetch_data()` 내부 |
+| 오류 판별 | 인터페이스만 | ✅ `is_retryable_error()` 구현 |
+| 응답 파싱 | — | ✅ `fetch_*()` 반환 형식 통일 책임 |
+
+### 2.4 후방호환 전략
+
+기존 `kosis_api.py` 의 함수형 API (`fetch_kosis_meta`, `fetch_kosis_latest`, `fetch_kosis_data`) 는
+**삭제하지 않고 thin wrapper 로 유지** 합니다.
+
+```python
+# kosis_api.py — 후방호환 wrapper (마이그레이션 기간 동안 유지)
+def fetch_kosis_meta(api_info, stats_src, data_info):
+    """후방호환 wrapper. 신규 코드는 KosisCollector.fetch_meta() 사용 권장."""
+    return KosisCollector(api_info, stats_src).fetch_meta(data_info)
+```
+
+이로써 `main.py` 의 import 와 호출부를 단계적으로 마이그레이션할 수 있습니다 (§5 참조).
+
 
 ---
 
