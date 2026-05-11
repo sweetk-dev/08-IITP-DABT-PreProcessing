@@ -241,7 +241,106 @@ VALUES ('DATA_GO_KR', '공공데이터포털', 'https://api.data.go.kr/...', 'AP
 
 ## 4. 설정 스키마
 
-*다음 commit 에서 채워집니다.*
+본 절은 멀티 소스에 따른 `.env` 환경변수 명명 규칙 및 `config.py` 매핑 변경안을 정의합니다. 설계 목표 G4 (키 명명 일관성) 를 충족합니다.
+
+### 4.1 현재 상태 (분석 #25 §2.3.5 인용)
+
+분석 #25 §2.3.5 에서 식별된 KOSIS 전용 환경변수 4개:
+
+| 환경변수 키 (현재) | 기본값 | 사용처 |
+|---|---|---|
+| `EXT_API_INFO_KOSIS_SYS` | `'KOSIS'` | `db.py: EXT_SYS_KOSIS` |
+| `MAX_KOSIS_API_GET_DATA_CNT` | `40000` | (현재 미사용, 설정값으로만 존재) |
+| `DATA_COLLECTION_SCOPE` | `'ALL'` | `main.py: get_filtered_stats_src_list()` |
+| `CHECK_DATA_LATEST_DATE_MODE` | `'OFF'` | `db_processing.py` 연동 예정 |
+
+### 4.2 새 명명 규칙 — `<EXT_SYS>_<KEY>`
+
+소스별 환경변수는 모두 **`<대문자 EXT_SYS>_<KEY>`** 형식으로 통일합니다.
+
+| 카테고리 | 명명 규칙 | 예시 |
+|---|---|---|
+| 소스 활성화 | `<EXT_SYS>_ENABLED` | `KOSIS_ENABLED=true`, `DATA_GO_KR_ENABLED=false` |
+| 인증키 (DB 미저장 시 fallback) | `<EXT_SYS>_API_KEY` | `KOSIS_API_KEY=xxx` |
+| 최대 데이터 건수 | `<EXT_SYS>_MAX_DATA_CNT` | `KOSIS_MAX_DATA_CNT=40000` (기존 `MAX_KOSIS_API_GET_DATA_CNT` 대체) |
+| 타임아웃 (초) | `<EXT_SYS>_TIMEOUT_SEC` | `KOSIS_TIMEOUT_SEC=30` |
+| 재시도 횟수 | `<EXT_SYS>_RETRY_COUNT` | `KOSIS_RETRY_COUNT=3` |
+
+### 4.3 글로벌 설정 (소스 무관)
+
+| 환경변수 키 | 기본값 | 비고 |
+|---|---|---|
+| `ENABLED_EXT_SYS_LIST` | `'KOSIS'` | 콤마 구분. 예: `'KOSIS,DATA_GO_KR'` — `main.py` 가 이 목록을 순회 |
+| `DATA_COLLECTION_SCOPE` | `'ALL'` | (변경 없음 — 분석 #25 §2.3.5) |
+| `CHECK_DATA_LATEST_DATE_MODE` | `'OFF'` | (변경 없음) |
+
+### 4.4 `config.py` 함수 시그니처 변경안
+
+```python
+# config.py (변경 후)
+def get_enabled_ext_sys_list() -> list[str]:
+    """활성화된 외부 API 소스 식별자 리스트.
+
+    예: 'KOSIS' 또는 'KOSIS,DATA_GO_KR' 형태의 환경변수를 파싱.
+    main.py 가 이 리스트를 순회하며 소스별 수집을 수행.
+    """
+    raw = os.getenv('ENABLED_EXT_SYS_LIST', 'KOSIS')
+    return [s.strip() for s in raw.split(',') if s.strip()]
+
+def get_ext_sys_config(ext_sys: str) -> dict:
+    """특정 소스의 설정값 묶음 반환.
+
+    반환 키: 'enabled', 'api_key', 'max_data_cnt', 'timeout_sec', 'retry_count'
+    환경변수가 없으면 합리적 기본값 사용.
+    """
+    return {
+        'enabled':       os.getenv(f'{ext_sys}_ENABLED', 'true').lower() == 'true',
+        'api_key':       os.getenv(f'{ext_sys}_API_KEY', ''),
+        'max_data_cnt':  int(os.getenv(f'{ext_sys}_MAX_DATA_CNT', '40000')),
+        'timeout_sec':   int(os.getenv(f'{ext_sys}_TIMEOUT_SEC', '30')),
+        'retry_count':   int(os.getenv(f'{ext_sys}_RETRY_COUNT', '3')),
+    }
+
+# 후방호환 helper — 기존 함수명 유지
+def get_kosis_sys() -> str:
+    """후방호환. 신규 코드는 get_enabled_ext_sys_list() 사용."""
+    return os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS')
+```
+
+### 4.5 환경변수 마이그레이션 매핑 (구->신)
+
+기존 `.env` 운영자가 알아야 할 변경 매핑:
+
+| 기존 키 | 신규 키 | 처리 방안 |
+|---|---|---|
+| `EXT_API_INFO_KOSIS_SYS` | (제거 권장) | 신규 코드는 `get_enabled_ext_sys_list()` 사용. 후방호환 wrapper `get_kosis_sys()` 가 당분간 유지 |
+| `MAX_KOSIS_API_GET_DATA_CNT` | `KOSIS_MAX_DATA_CNT` | 둘 다 인식하도록 `config.py` 에서 fallback 처리 |
+| (없음) | `ENABLED_EXT_SYS_LIST` | 신규 추가. 기본값 `'KOSIS'` — 기존 운영에 영향 없음 |
+| (없음) | `KOSIS_API_KEY` | 선택 — DB 의 `sys_ext_api_info.auth` 가 우선. fallback 용도 |
+
+### 4.6 `.env.example` 추가 권장
+
+`#27` 또는 `#28` PR 에서 다음과 같은 `.env.example` 추가 권장 (실제 키 값은 빈 문자열).
+
+```ini
+# 멀티 소스 설정
+ENABLED_EXT_SYS_LIST=KOSIS
+DATA_COLLECTION_SCOPE=ALL
+CHECK_DATA_LATEST_DATE_MODE=OFF
+
+# KOSIS 소스
+KOSIS_ENABLED=true
+KOSIS_API_KEY=
+KOSIS_MAX_DATA_CNT=40000
+KOSIS_TIMEOUT_SEC=30
+KOSIS_RETRY_COUNT=3
+
+# 공공데이터포털 (예시 — #29 에서 활성화)
+# DATA_GO_KR_ENABLED=false
+# DATA_GO_KR_API_KEY=
+# DATA_GO_KR_MAX_DATA_CNT=10000
+```
+
 
 ---
 
