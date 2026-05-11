@@ -28,7 +28,7 @@ if engine:
     except Exception as e:
         db_logger.error(f"DB 타임존 설정 실패: {e}")
 
-def get_api_info():
+def get_api_info(ext_sys: str = 'KOSIS'):
     db_logger.info("KOSIS API 정보 조회 시작")
     try:
         session = Session()
