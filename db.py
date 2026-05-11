@@ -51,6 +51,10 @@ def get_api_info(ext_sys: str = 'KOSIS'):
         >>> info = get_api_info()                  # 기존 KOSIS 호출 (후방호환)
         >>> info = get_api_info('KOSIS')           # 명시 호출
         >>> info = get_api_info('DATA_GO_KR')      # 신규 소스
+
+    설계 근거:
+        docs/design/26-multi-source-architecture.md §3.3.1
+        (이슈 #26 — 멀티 외부 API 소스 확장 아키텍처)
     """
     db_logger.info(f"외부 API 정보 조회 시작 (ext_sys={ext_sys})")
     try:
