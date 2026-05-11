@@ -290,5 +290,73 @@ db_processing.process_db_insertion()
 | `kosis_api.py` | 소스 독립적 클라이언트 인터페이스 추출 또는 래퍼 분리 | 높음 |
 | `main.py` | import 추상화, 저장 경로 소스별 분리, 흐름 제어 범용화 | 높음 |
 | `db_processing.py` | 파일 파싱 로직 소스별 분기 (JSON/XML 이미 일부 지원) | 중간 |
+---
 
+## 4. 결론
+
+### 4.1 KOSIS 단일 소스 의존 현황 요약
+
+코드 분석 결과, 현재 데이터 수집 구조는 **KOSIS API에 강하게 결합**되어 있습니다.
+
+| 지표 | 현황 |
+|------|------|
+| KOSIS 의존 핫스팟 수 | **8개** (H1~H8) |
+| 추상화 계층 존재 여부 | **없음** — 구현에 직접 결합 |
+| 다른 소스 추가 시 수정 필요 파일 수 | **5개 전체** (config, db, kosis_api, main, db_processing) |
+| KOSIS 전용 오류 처리 로직 | Error 31 재귀 분할 수집 (kosis_api.py 전용) |
+| 저장 경로 소스명 하드코딩 | `kosis_data/` 디렉터리 |
+
+### 4.2 리스크 식별
+
+1. **KOSIS 서버 장애 시 전체 수집 중단** — 단일 실패 지점(SPOF)
+2. **다른 통계 소스 추가 불가** — 현재 구조에서 KOSIS 외 소스를 추가하려면 대규모 리팩터링 필요
+3. **`fetchone()` 암묵적 가정** — DB에 복수 API 소스가 등록되어 있어도 첫 번째만 사용
+4. **모듈 레벨 상수 `EXT_SYS_KOSIS`** — 런타임 교체 불가, 테스트 격리 어려움
+
+---
+
+## 5. 권장 방향 (#26 설계 입력)
+
+이슈 #26(다중 소스 아키텍처 설계)을 위한 입력 자료로 다음을 제안합니다.
+
+### 5.1 단기 개선 (리팩터링 — 기능 변경 없음)
+
+1. **`get_api_info()` — `fetchone()` → 소스 목록 반환으로 변경**
+   - `fetchall()`로 복수 API 소스를 가져올 수 있도록 시그니처 확장
+   - 현재는 KOSIS 1건만 처리하므로 동작 변경 없이 리팩터링 가능
+
+2. **`kosis_data/` 경로 → 소스별 분리**
+   - `kosis_data/` → `ext_data/kosis/` 또는 `ext_data/{ext_sys}/`
+   - 다중 소스 추가 시 경로 충돌 방지
+
+3. **`kosis_api.py` 모듈명 일반화 준비**
+   - 내부 구현은 유지하되, `main.py`에서 인터페이스를 통해 호출하도록 래퍼 함수 추가 고려
+
+### 5.2 중기 설계 (이슈 #26 범위)
+
+1. **외부 API 클라이언트 추상화**
+   - `BaseApiClient` 인터페이스 정의 (fetch_data, fetch_meta, fetch_latest 메서드)
+   - `KosisApiClient(BaseApiClient)` 구현체로 전환
+   - 신규 소스는 `NewSourceApiClient(BaseApiClient)` 형태로 추가
+
+2. **소스 라우터 도입**
+   - `get_api_info()` 반환값의 `ext_sys` 필드를 기반으로 클라이언트 선택
+   - `main.py`에서 소스별 분기 제거
+
+3. **저장 경로 통합 관리**
+   - `create_data_save_directory(ext_sys)` 형태로 소스명을 경로에 반영
+
+### 5.3 핫스팟별 이슈 #26 대응 매핑
+
+| 핫스팟 | 이슈 #26 대응 방안 |
+|--------|-------------------|
+| H2, H3 | `db.py get_api_info()` 복수 소스 반환 + 소스별 라우팅 |
+| H4, H6 | `BaseApiClient` 추상화 + 소스 선택 팩토리 |
+| H5 | 오류 처리 전략 소스별 분리 |
+| H7 | 저장 경로 `ext_sys` 파라미터화 |
+| H8 | `save_single_file()` 클라이언트 주입 방식으로 리팩터링 |
+
+---
+
+*Closes #25*
 
