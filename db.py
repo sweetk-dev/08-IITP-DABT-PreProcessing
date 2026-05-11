@@ -29,6 +29,29 @@ if engine:
         db_logger.error(f"DB 타임존 설정 실패: {e}")
 
 def get_api_info(ext_sys: str = 'KOSIS'):
+    """sys_ext_api_info 테이블에서 ext_sys 키로 외부 API 메타데이터를 단건 조회한다.
+
+    이슈 #27 — 멀티소스 동적 조회 지원.
+    `sys_ext_api_info.ext_sys` 컬럼을 라우팅 키로 사용하여 KOSIS 이외의 신규
+    외부 API 소스도 동일한 인터페이스로 조회할 수 있도록 일반화했다.
+
+    Args:
+        ext_sys: 조회할 외부 시스템 식별자.
+            - 'KOSIS' (default): 국가통계포털 (후방호환 — 인자 미지정 시)
+            - 'DATA_GO_KR': 공공데이터포털 (예시)
+            - 'MICRODATA': 마이크로데이터 (예시)
+            기타 sys_ext_api_info 에 등록된 임의 ext_sys 값.
+
+    Returns:
+        단건 dict — 컬럼: ext_api_id / if_name / ext_sys / ext_url / auth /
+        data_format / latest_sync_time / status.
+        해당 ext_sys 의 active 행이 없으면 빈 dict ({}) 반환.
+
+    예시:
+        >>> info = get_api_info()                  # 기존 KOSIS 호출 (후방호환)
+        >>> info = get_api_info('KOSIS')           # 명시 호출
+        >>> info = get_api_info('DATA_GO_KR')      # 신규 소스
+    """
     db_logger.info(f"외부 API 정보 조회 시작 (ext_sys={ext_sys})")
     try:
         session = Session()
