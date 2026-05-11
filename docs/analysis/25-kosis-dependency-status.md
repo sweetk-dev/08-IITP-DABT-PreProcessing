@@ -90,5 +90,61 @@ row = result.fetchone()  # ← 단 1건만 가져옴
 | `ext_url` | KOSIS API 기본 URL | `kosis_api.py: build_kosis_url()` |
 | `auth` | KOSIS API 인증키 | `kosis_api.py: build_kosis_url()` |
 | `data_format` | 기본 응답 형식 | 참조 |
+### 2.2 kosis_api.py
+
+`kosis_api.py`는 KOSIS REST API와 직접 통신하는 전용 클라이언트 모듈입니다.
+모든 함수가 KOSIS 전용 파라미터 구조에 완전히 의존하며, 다른 외부 API와 공유할 수 있는 추상화가 존재하지 않습니다.
+
+#### 2.2.1 공개 함수 목록
+
+| 함수 | KOSIS 엔드포인트 키 | 반환 타입 | 비고 |
+|------|---------------------|-----------|------|
+| `build_kosis_url(...)` | `api_data_url` / `api_meta_url` / `api_latest_chn_dt_url` | `(url, format)` | URL 빌더 |
+| `fetch_kosis_meta(...)` | `api_meta_url` | JSON 또는 텍스트 | 통계 메타정보 |
+| `fetch_kosis_latest(...)` | `api_latest_chn_dt_url` | JSON 또는 텍스트 | 최신 변경일 |
+| `fetch_kosis_data(...)` | `api_data_url` | JSON 또는 텍스트 | 실제 통계 데이터 (retry 포함) |
+| `fetch_kosis_data_single(...)` | `api_data_url` | JSON 또는 텍스트 | 단일 기간 수집 |
+| `fetch_kosis_data_split(...)` | `api_data_url` | `list` | 기간 분할 재귀 수집 |
+| `fetch_kosis_data_with_retry(...)` | `api_data_url` | JSON 또는 `list` | Error 31 자동 분할 진입점 |
+| `is_error_31(response)` | — | `bool` | KOSIS 전용 오류 코드 판별 |
+
+#### 2.2.2 `build_kosis_url()` 파라미터 의존 분석
+
+```python
+def build_kosis_url(api_info, stats_src, stats_src_data_info, url_key, from_year=None, to_year=None):
+    base_url  = api_info.get('ext_url', '')       # DB: sys_ext_api_info.ext_url
+    url_info  = stats_src.get(url_key)             # DB: sys_stats_src_api_info.<url_key>
+    url = url.replace('{API_AUTH_KEY}', api_info.get('auth', ''))  # DB: sys_ext_api_info.auth
+    url = url.replace('{from}', str(from_year))   # DB: stats_src_data_info.collect_start_dt
+    url = url.replace('{to}', str(to_year))       # DB: stats_src_data_info.collect_end_dt
+```
+
+모든 URL 구성 요소(base URL, 인증키, 기간 파라미터)가 DB에서 조회된 KOSIS 전용 딕셔너리로부터 추출됩니다.
+다른 API를 위한 URL 빌더를 추가하려면 별도 함수 또는 전략 패턴이 필요합니다.
+
+#### 2.2.3 KOSIS Error 31 전용 로직
+
+KOSIS API는 조회 데이터 건수가 한계를 초과하면 `err: '31'`을 반환합니다.
+이를 처리하기 위한 재귀 분할 수집 로직이 내장되어 있습니다.
+
+```
+fetch_kosis_data()
+  └─ fetch_kosis_data_with_retry()  : 전체 기간 1차 시도
+       └─ fetch_kosis_data_split()  : Error 31 시 재귀 분할 (1/2 씩)
+            └─ fetch_kosis_data_single()  : 단일 기간 실제 HTTP 요청
+```
+
+이 로직은 KOSIS Error 코드 체계에 특화되어 있어 다른 데이터 소스에 직접 재사용할 수 없습니다.
+
+#### 2.2.4 KOSIS 전용 3개 엔드포인트 구조
+
+| 엔드포인트 키 | 용도 | 저장 위치 |
+|---------------|------|-----------|
+| `api_meta_url` | 통계표 메타정보 (항목 구조, 분류 등) | `kosis_data/<date>/meta/` |
+| `api_latest_chn_dt_url` | 통계표 최신 변경일 조회 | `kosis_data/<date>/latest/` |
+| `api_data_url` | 실제 통계 데이터 (기간 기반) | `kosis_data/<date>/data/` |
+
+3개 엔드포인트 모두 `sys_stats_src_api_info` 테이블의 JSON 컬럼에 URL 템플릿으로 저장되어 있으며,
+다른 API 소스는 동일한 컬럼 구조를 가져야 호환이 가능합니다.
 
 
