@@ -29,7 +29,7 @@ if engine:
         db_logger.error(f"DB 타임존 설정 실패: {e}")
 
 def get_api_info(ext_sys: str = 'KOSIS'):
-    db_logger.info("KOSIS API 정보 조회 시작")
+    db_logger.info(f"외부 API 정보 조회 시작 (ext_sys={ext_sys})")
     try:
         session = Session()
         query = text("""
@@ -39,7 +39,7 @@ def get_api_info(ext_sys: str = 'KOSIS'):
             WHERE ext_sys = :ext_sys AND del_yn = 'N' AND status = 'A'
         """)
         db_logger.debug(f"Executing SQL: {query}")
-        result = session.execute(query, {'ext_sys': EXT_SYS_KOSIS})
+        result = session.execute(query, {'ext_sys': ext_sys})
         row = result.fetchone()
         
         if row:
@@ -53,14 +53,14 @@ def get_api_info(ext_sys: str = 'KOSIS'):
                 'latest_sync_time': row.latest_sync_time,
                 'status': row.status
             }
-            db_logger.info(f"KOSIS API 정보 조회 성공: {api_info['ext_sys']} - {api_info['if_name']} - {api_info['status']}")
+            db_logger.info(f"외부 API 정보 조회 성공: {api_info['ext_sys']} - {api_info['if_name']} - {api_info['status']}")
             return api_info
         else:
-            db_logger.warning("KOSIS API 정보가 DB에 없거나 삭제된 상태입니다.")
+            db_logger.warning(f"외부 API 정보가 DB에 없거나 삭제된 상태입니다 (ext_sys={ext_sys}).")
             return {}
             
     except Exception as e:
-        db_logger.error(f"KOSIS API 정보 조회 실패: {e}")
+        db_logger.error(f"외부 API 정보 조회 실패 (ext_sys={ext_sys}): {e}")
         raise
     finally:
         session.close()
