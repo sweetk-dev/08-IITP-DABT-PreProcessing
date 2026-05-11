@@ -434,10 +434,190 @@ KOSIS_RETRY_COUNT=3
 
 ## 6. 예제 어댑터 구현 개요
 
-*다음 commit 에서 채워집니다.*
+본 절은 §2 의 `BaseCollector` 를 기반으로 한 예제 구현 골격을 보여줍니다. **구현 PR 이 아닙니다** — 실제 구현은 #27 (KosisCollector) 과 #29 (DataGoKrCollector) 에서.
+
+### 6.1 KosisCollector 골격 (이슈 #27 작업 입력)
+
+```python
+# trader/collectors/kosis.py (#27 에서 신규 작성 예정)
+from .base import BaseCollector
+from typing import Any
+
+class KosisCollector(BaseCollector):
+    EXT_SYS = 'KOSIS'
+
+    def _build_url(self, data_info: dict, url_key: str,
+                   from_year=None, to_year=None) -> tuple[str, str]:
+        """분석 #25 §2.2.2 의 build_kosis_url() 로직을 클래스 내부로 이동."""
+        base_url  = self.api_info.get('ext_url', '')
+        url_info  = self.stats_src.get(url_key)
+        url = url_info['url']
+        url = url.replace('{API_AUTH_KEY}', self.api_info.get('auth', ''))
+        if from_year is not None:
+            url = url.replace('{from}', str(from_year))
+        if to_year is not None:
+            url = url.replace('{to}', str(to_year))
+        return url, url_info.get('format', self.api_info.get('data_format', 'json'))
+
+    def fetch_meta(self, data_info: dict):
+        url, fmt = self._build_url(data_info, 'api_meta_url')
+        # ... requests.get(url, timeout=...) → 응답 파싱
+        ...
+
+    def fetch_latest(self, data_info: dict):
+        url, fmt = self._build_url(data_info, 'api_latest_chn_dt_url')
+        ...
+
+    def fetch_data(self, data_info: dict):
+        """분석 #25 §2.2.3 의 fetch_kosis_data_with_retry() / fetch_kosis_data_split()
+        재귀 분할 로직을 본 메서드 내부에서 호출."""
+        from_year = data_info.get('collect_start_dt')
+        to_year   = data_info.get('collect_end_dt')
+        return self._fetch_with_retry(data_info, from_year, to_year)
+
+    def _fetch_with_retry(self, data_info, from_year, to_year):
+        """Error 31 자동 분할 — 분석 #25 §2.2.3 의 로직 유지."""
+        ...
+
+    def is_retryable_error(self, response: Any) -> bool:
+        """KOSIS Error 31 — 분석 #25 §2.2.3 / H5 핫스팟."""
+        if isinstance(response, dict):
+            return response.get('err') == '31'
+        return False
+```
+
+### 6.2 DataGoKrCollector 골격 (이슈 #29 작업 입력)
+
+```python
+# trader/collectors/data_go_kr.py (#29 에서 신규 작성 예정)
+from .base import BaseCollector
+from typing import Any
+
+class DataGoKrCollector(BaseCollector):
+    EXT_SYS = 'DATA_GO_KR'
+
+    def _build_url(self, data_info: dict, endpoint_key: str) -> tuple[str, str]:
+        """공공데이터포털의 URL 구조 — KOSIS 와 다른 파라미터 체계."""
+        base_url = self.api_info.get('ext_url', '')
+        endpoint = self.stats_src.get(endpoint_key, {}).get('url')
+        # 공공데이터포털은 serviceKey 쿼리 파라미터 사용
+        url = f"{base_url}{endpoint}?serviceKey={self.api_info.get('auth', '')}"
+        return url, 'xml'  # 공공데이터포털 기본 응답은 XML
+
+    def fetch_meta(self, data_info: dict):
+        url, fmt = self._build_url(data_info, 'api_meta_url')
+        ...
+
+    def fetch_latest(self, data_info: dict):
+        # 공공데이터포털은 별도 변경일 엔드포인트가 없으므로
+        # data_info.last_modified 를 대신 반환 또는 빈 응답
+        return {}
+
+    def fetch_data(self, data_info: dict):
+        url, fmt = self._build_url(data_info, 'api_data_url')
+        ...
+
+    def is_retryable_error(self, response: Any) -> bool:
+        """공공데이터포털의 SERVICE_KEY_ERROR / LIMITED_NUMBER_OF_SERVICE_REQUESTS 등."""
+        if isinstance(response, dict):
+            result_code = response.get('resultCode')
+            return result_code in {'22', '03'}  # 예시
+        return False
+```
+
+### 6.3 Collector 팩토리 — `main.py` 분기 변경
+
+```python
+# main.py (변경 후 — 분석 #25 §2.3.1 의 import 추상화 처리)
+from trader.collectors.base import BaseCollector
+from trader.collectors.kosis import KosisCollector
+from trader.collectors.data_go_kr import DataGoKrCollector  # #29 시 추가
+
+COLLECTOR_REGISTRY: dict[str, type[BaseCollector]] = {
+    'KOSIS':       KosisCollector,
+    'DATA_GO_KR':  DataGoKrCollector,   # #29 시 추가
+}
+
+def get_collector(ext_sys: str, api_info: dict, stats_src: dict) -> BaseCollector:
+    cls = COLLECTOR_REGISTRY.get(ext_sys)
+    if cls is None:
+        raise ValueError(f"Unknown ext_sys: {ext_sys}")
+    return cls(api_info, stats_src)
+
+def save_single_file(api_info, stats_src, dirs, data_info):
+    """분석 #25 §2.3.4 의 호출 흐름을 Collector 추상화로 전환."""
+    collector = get_collector(api_info['ext_sys'], api_info, stats_src)
+    collector.save_response(collector.fetch_meta(data_info),   dirs['meta'],   ...)
+    collector.save_response(collector.fetch_latest(data_info), dirs['latest'], ...)
+    collector.save_response(collector.fetch_data(data_info),   dirs['data'],   ...)
+```
+
+### 6.4 디렉터리 구조 (변경 후 — 분석 #25 §2.3.3 의 경로 분리)
+
+```
+ext_data/                            ← 분석 #25 §2.3.3 의 'kosis_data/' 대체 (H7 처리)
+├── kosis/
+│   ├── 2026-05-11/
+│   │   ├── meta/
+│   │   ├── latest/
+│   │   └── data/
+│   └── ...
+└── data_go_kr/                      ← #29 시 활성화
+    └── 2026-05-11/
+        ├── meta/
+        └── data/
+```
+
+> **후방호환**: 환경변수 `LEGACY_SAVE_DIR=on` 시 `kosis_data/` 디렉터리 유지 (§5.1 3단계 참조).
 
 ---
 
 ## 7. #27/#28/#29 작업 분해 매핑
 
-*다음 commit 에서 채워집니다.*
+본 설계 문서가 후속 이슈 3건의 작업 입력으로 어떻게 활용되는지 정리합니다.
+
+### 7.1 이슈별 작업 입력 매핑
+
+| 이슈 | 라벨 | 본 설계 문서 참조 절 | 주요 산출물 |
+|---|---|---|---|
+| **#27** [구현] Collector 어댑터 추출 | enhancement | §2 (BaseCollector), §6.1 (KosisCollector 골격), §5.1 2단계 | `trader/collectors/base.py`, `trader/collectors/kosis.py`, `main.py` 분기 |
+| **#28** [구현] DB·설정 일반화 | enhancement | §3 (DB 스키마), §4 (설정 스키마), §5.1 1단계 | `db.py:get_api_info(ext_sys=)`, `config.py:get_enabled_ext_sys_list()`, `.env.example`, 마이그레이션 SQL |
+| **#29** [구현] 신규 소스 어댑터 추가 (DATA_GO_KR) | enhancement | §6.2 (DataGoKrCollector 골격), §5.1 4단계 | `trader/collectors/data_go_kr.py`, DB row 추가 SQL, `.env` 키 추가 |
+
+### 7.2 의존성 그래프
+
+```
+#28 (DB·설정 일반화)
+   │   └── 후방호환 wrapper 로 KOSIS 정상 동작
+   ▼
+#27 (Collector 어댑터 추출)
+   │   └── kosis_api.py 의 함수는 thin wrapper 로 유지
+   ▼
+#29 (신규 소스 어댑터)
+       └── main.py 변경 없이 어댑터 추가로 활성화
+```
+
+> #28 ↔ #27 의 순서는 권장이며 차단 의존성은 아닙니다 (§5.5 참조).
+
+### 7.3 검증 기준 (각 후속 PR 머지 전 확인)
+
+- [ ] §2 의 `BaseCollector` 인터페이스 시그니처 일치 (#27)
+- [ ] §3.3 의 `db.py` 함수 시그니처 일치 (#28)
+- [ ] §4.2 의 환경변수 명명 규칙 일치 (#28, #29)
+- [ ] §5.2 의 후방호환 보장 체크리스트 통과 (#27, #28, #29 모두)
+- [ ] 기존 KOSIS smoke test 통과 (`python main.py --mode file` 1개 통계표 수집 성공)
+
+### 7.4 본 설계 문서 변경 정책
+
+본 설계 문서는 #27/#28/#29 진행 중 다음과 같이 갱신될 수 있습니다.
+
+| 시점 | 갱신 사유 | 갱신 방식 |
+|---|---|---|
+| #27 머지 직후 | 실제 구현과 설계의 차이 발견 | follow-up PR 로 본 문서 갱신 |
+| #28 머지 직후 | DB 스키마 / config 함수 시그니처 변동 | follow-up PR |
+| #29 머지 직후 | 신규 소스 어댑터 골격이 §6.2 와 다른 경우 | follow-up PR |
+
+---
+
+*Closes #26*
+
