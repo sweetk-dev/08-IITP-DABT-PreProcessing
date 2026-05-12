@@ -85,3 +85,76 @@ class SaveResponseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# -----------------------------------------------------------------------------
+# KosisCollector parity tests
+# -----------------------------------------------------------------------------
+
+from unittest.mock import patch  # noqa: E402
+
+from collectors.kosis import KosisCollector  # noqa: E402
+
+
+class KosisCollectorAdapterTests(unittest.TestCase):
+    """KosisCollector must delegate to legacy kosis_api functions identically.
+
+    These tests verify the adapter does not alter behavior: each adapter
+    method calls the matching legacy function and returns its result.
+    """
+
+    API_INFO = {"ext_api_id": 1, "ext_url": "https://example.test", "auth": "X"}
+    STATS_SRC = {"stat_tbl_id": "T1"}
+    DATA_INFO = {"collect_start_dt": "2020", "collect_end_dt": "2024"}
+
+    def test_ext_sys_constant(self):
+        c = KosisCollector(self.API_INFO, self.STATS_SRC)
+        self.assertEqual(c.EXT_SYS, "KOSIS")
+
+    def test_fetch_meta_delegates(self):
+        with patch("collectors.kosis.kosis_api.fetch_kosis_meta", return_value={"ok": 1}) as m:
+            c = KosisCollector(self.API_INFO, self.STATS_SRC)
+            result = c.fetch_meta(self.DATA_INFO)
+        m.assert_called_once_with(self.API_INFO, self.STATS_SRC, self.DATA_INFO)
+        self.assertEqual(result, {"ok": 1})
+
+    def test_fetch_latest_delegates(self):
+        with patch("collectors.kosis.kosis_api.fetch_kosis_latest", return_value="2026-05-01") as m:
+            c = KosisCollector(self.API_INFO, self.STATS_SRC)
+            result = c.fetch_latest(self.DATA_INFO)
+        m.assert_called_once_with(self.API_INFO, self.STATS_SRC, self.DATA_INFO)
+        self.assertEqual(result, "2026-05-01")
+
+    def test_fetch_data_delegates(self):
+        rows = [{"y": 2020}, {"y": 2021}]
+        with patch("collectors.kosis.kosis_api.fetch_kosis_data", return_value=rows) as m:
+            c = KosisCollector(self.API_INFO, self.STATS_SRC)
+            result = c.fetch_data(self.DATA_INFO)
+        m.assert_called_once_with(self.API_INFO, self.STATS_SRC, self.DATA_INFO)
+        self.assertEqual(result, rows)
+
+    def test_is_retryable_error_matches_is_error_31(self):
+        c = KosisCollector(self.API_INFO, self.STATS_SRC)
+        self.assertTrue(c.is_retryable_error({"err": "31"}))
+        self.assertFalse(c.is_retryable_error({"err": "0"}))
+        self.assertFalse(c.is_retryable_error("plain text"))
+
+
+class KosisCollectorParityTests(unittest.TestCase):
+    """Adapter result must equal legacy module result for the same inputs."""
+
+    def test_parity_fetch_meta(self):
+        sentinel = {"sentinel": "meta"}
+        import kosis_api as legacy
+        with patch.object(legacy, "fetch_kosis_meta", return_value=sentinel):
+            legacy_out = legacy.fetch_kosis_meta({}, {}, {})
+            adapter_out = KosisCollector({}, {}).fetch_meta({})
+        self.assertEqual(legacy_out, adapter_out)
+
+    def test_parity_fetch_data(self):
+        sentinel = [{"row": 1}]
+        import kosis_api as legacy
+        with patch.object(legacy, "fetch_kosis_data", return_value=sentinel):
+            legacy_out = legacy.fetch_kosis_data({}, {}, {})
+            adapter_out = KosisCollector({}, {}).fetch_data({})
+        self.assertEqual(legacy_out, adapter_out)
