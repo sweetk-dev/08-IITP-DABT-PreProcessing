@@ -324,3 +324,7 @@ failed_datas/
 .env
 .env.dev
 .env.prd
+
+# Local workspace meta
+.workspace/
+WORKSPACE.md
