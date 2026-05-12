@@ -8,18 +8,28 @@ Each subclass represents one ``ext_sys`` identifier and encapsulates:
 - Source-specific retry/split logic
 - Source-specific error detection
 
-The base class provides common file-saving behavior so that adapters do not
-duplicate filesystem code.
+The base class provides common file-saving behavior and a shared HTTP GET
+helper with retry/timeout so that adapters do not duplicate that code.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
-from typing import Any, Union
+from typing import Any, Optional, Union
+
+import requests
 
 logger = logging.getLogger(__name__)
+
+# Default HTTP behavior (overridable per-call). Conservative values that
+# preserve current KOSIS behavior (single try, no timeout) when callers do
+# not opt in — see KosisCollector usage in collectors/kosis.py.
+DEFAULT_TIMEOUT_SEC = 30
+DEFAULT_RETRY_COUNT = 0
+DEFAULT_RETRY_BACKOFF_SEC = 1.0
 
 
 class BaseCollector(ABC):
@@ -62,6 +72,65 @@ class BaseCollector(ABC):
     @abstractmethod
     def is_retryable_error(self, response: Any) -> bool:
         """Return ``True`` when ``response`` indicates a retryable error."""
+
+    # --- Common HTTP utility ----------------------------------------------
+
+    def http_get(
+        self,
+        url: str,
+        timeout: Optional[int] = None,
+        retries: Optional[int] = None,
+        backoff_sec: Optional[float] = None,
+    ) -> requests.Response:
+        """Issue a GET request with optional retry/timeout.
+
+        ``retries=0`` disables the retry loop and produces a single request
+        identical to plain ``requests.get(url)`` — used to preserve historic
+        KOSIS behavior for callers that opt out.
+
+        On HTTP failure the method raises ``RuntimeError`` after exhausting
+        retries; on success it returns the ``Response`` untouched so that
+        adapter code can inspect ``status_code`` / ``json()`` / ``text``.
+        """
+        timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_SEC
+        retries = retries if retries is not None else DEFAULT_RETRY_COUNT
+        backoff_sec = backoff_sec if backoff_sec is not None else DEFAULT_RETRY_BACKOFF_SEC
+
+        last_exc: Optional[Exception] = None
+        attempts = retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = requests.get(url, timeout=timeout)
+                if resp.status_code == 200:
+                    return resp
+                logger.warning(
+                    "%s GET %s failed status=%s body=%s",
+                    self.EXT_SYS or "BASE",
+                    url,
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"{self.EXT_SYS or 'BASE'} GET failed status={resp.status_code}"
+                    )
+            except requests.RequestException as exc:
+                last_exc = exc
+                logger.warning(
+                    "%s GET %s exception attempt=%d/%d: %s",
+                    self.EXT_SYS or "BASE",
+                    url,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"{self.EXT_SYS or 'BASE'} GET exception: {exc}"
+                    ) from last_exc
+            time.sleep(backoff_sec)
+        # Unreachable, but keep mypy happy.
+        raise RuntimeError(f"{self.EXT_SYS or 'BASE'} GET unreachable state")
 
     # --- Common utilities (shared across sources) --------------------------
 
