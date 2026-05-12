@@ -83,32 +83,57 @@ def setup_logging():
     db_logger.setLevel(log_level)
 
 
-# 이슈 #29: 멀티소스 저장 경로 일반화
-# 새 패턴: ext_data/<EXT_SYS>/<YYYYMMDD>/{data,meta,latest}
-# KOSIS 후방호환은 commit#3 (preserve KOSIS legacy save path) 에서 추가됨.
+# 이슈 #29: 멀티소스 저장 경로 일반화 + KOSIS 후방호환
+#
+# KOSIS 경로 (ext_sys='KOSIS', default):
+#     kosis_data/<YYYYMMDD>/{data,meta,latest}             # 기존 패턴 그대로 유지
+#
+# 그 외 ext_sys (ext_sys != 'KOSIS'):
+#     ext_data/<EXT_SYS>/<YYYYMMDD>/{data,meta,latest}     # 신규 일반화 패턴
+#
+# 후방호환 결정 근거: KOSIS 가 기존 운영 중인 유일한 소스이므로 KOSIS 의
+# 디렉터리 트리 / 로그 파일명 패턴 등을 변경하지 않는다 (회귀 0 보장).
+LEGACY_KOSIS_DATA_ROOT = "kosis_data"
 GENERIC_EXT_DATA_ROOT = "ext_data"
+
+
+def _resolve_data_roots(ext_sys_norm):
+    """ext_sys 별로 (data_root, root_dir) 디렉터리 경로를 결정한다.
+
+    KOSIS 는 레거시 경로(``kosis_data/<YYYYMMDD>``) 를 그대로 사용하고,
+    그 외 ext_sys 는 새 패턴(``ext_data/<EXT_SYS>/<YYYYMMDD>``) 을 사용한다.
+    """
+    today_str = datetime.now().strftime('%Y%m%d')
+    if ext_sys_norm == DEFAULT_EXT_SYS:
+        data_root = LEGACY_KOSIS_DATA_ROOT
+        root_dir = os.path.join(data_root, today_str)
+        ensure_dirs = [data_root, root_dir]
+    else:
+        data_root = GENERIC_EXT_DATA_ROOT
+        root_dir = os.path.join(data_root, ext_sys_norm, today_str)
+        ensure_dirs = [data_root, os.path.join(data_root, ext_sys_norm), root_dir]
+    return data_root, root_dir, ensure_dirs
 
 
 def create_data_save_directory(ext_sys=DEFAULT_EXT_SYS):
     """수집 결과 저장 경로 트리를 생성한다.
 
-    제너릭 패턴: ``ext_data/<EXT_SYS>/<YYYYMMDD>/{data,meta,latest}``
+    - KOSIS (default): ``kosis_data/<YYYYMMDD>/{data,meta,latest}`` (후방호환)
+    - 그 외:          ``ext_data/<EXT_SYS>/<YYYYMMDD>/{data,meta,latest}``
 
     Parameters
     ----------
     ext_sys:
-        외부 시스템 식별자. 디렉터리 이름에 그대로 사용 (대문자 정규화).
+        외부 시스템 식별자. 대문자로 정규화되어 디렉터리 이름에 사용.
     """
-    today_str = datetime.now().strftime('%Y%m%d')
     ext_sys_norm = (ext_sys or DEFAULT_EXT_SYS).upper()
+    data_root, root_dir, ensure_dirs = _resolve_data_roots(ext_sys_norm)
 
-    data_root = GENERIC_EXT_DATA_ROOT
-    root_dir = os.path.join(data_root, ext_sys_norm, today_str)
     data_dir = os.path.join(root_dir, "data")
     meta_dir = os.path.join(root_dir, "meta")
     latest_dir = os.path.join(root_dir, "latest")
 
-    for d in [data_root, os.path.join(data_root, ext_sys_norm), root_dir, data_dir, meta_dir, latest_dir]:
+    for d in ensure_dirs + [data_dir, meta_dir, latest_dir]:
         if not os.path.exists(d):
             os.makedirs(d)
 
