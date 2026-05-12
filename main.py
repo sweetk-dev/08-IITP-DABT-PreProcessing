@@ -13,6 +13,19 @@ from collectors import BaseCollector, KosisCollector
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+# ============================================================================
+# Version marker — issue #29, multi-source extension milestone.
+# ----------------------------------------------------------------------------
+# v1.5.0 closes the 5-step extension series (#25 analysis -> #26 design ->
+# #27 db.py multi-source query -> #28 BaseCollector abstraction -> #29 main.py
+# ext_sys routing + save path generalization). KOSIS backward compatibility is
+# preserved: with ext_sys defaulting to 'KOSIS', the legacy save path and the
+# collector behavior are identical to v1.4.0.
+# ============================================================================
+__version__ = "1.5.0"
+
+
+
 # --- 이슈 #29: ext_sys 기반 멀티소스 라우팅 ---------------------------------
 # 진입점 (main.py) 가 외부 시스템(ext_sys) 인자/환경변수를 받아 알맞은
 # BaseCollector 어댑터로 분기합니다. 기존 KOSIS 단일 경로를 한 번에 일반화하지
