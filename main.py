@@ -83,15 +83,32 @@ def setup_logging():
     db_logger.setLevel(log_level)
 
 
-def create_data_save_directory():
-    data_root = "kosis_data"
+# 이슈 #29: 멀티소스 저장 경로 일반화
+# 새 패턴: ext_data/<EXT_SYS>/<YYYYMMDD>/{data,meta,latest}
+# KOSIS 후방호환은 commit#3 (preserve KOSIS legacy save path) 에서 추가됨.
+GENERIC_EXT_DATA_ROOT = "ext_data"
+
+
+def create_data_save_directory(ext_sys=DEFAULT_EXT_SYS):
+    """수집 결과 저장 경로 트리를 생성한다.
+
+    제너릭 패턴: ``ext_data/<EXT_SYS>/<YYYYMMDD>/{data,meta,latest}``
+
+    Parameters
+    ----------
+    ext_sys:
+        외부 시스템 식별자. 디렉터리 이름에 그대로 사용 (대문자 정규화).
+    """
     today_str = datetime.now().strftime('%Y%m%d')
-    root_dir = os.path.join(data_root, today_str)
+    ext_sys_norm = (ext_sys or DEFAULT_EXT_SYS).upper()
+
+    data_root = GENERIC_EXT_DATA_ROOT
+    root_dir = os.path.join(data_root, ext_sys_norm, today_str)
     data_dir = os.path.join(root_dir, "data")
     meta_dir = os.path.join(root_dir, "meta")
     latest_dir = os.path.join(root_dir, "latest")
 
-    for d in [data_root, root_dir, data_dir, meta_dir, latest_dir]:
+    for d in [data_root, os.path.join(data_root, ext_sys_norm), root_dir, data_dir, meta_dir, latest_dir]:
         if not os.path.exists(d):
             os.makedirs(d)
 
@@ -99,7 +116,8 @@ def create_data_save_directory():
         "root": root_dir,
         "data": data_dir,
         "meta": meta_dir,
-        "latest": latest_dir
+        "latest": latest_dir,
+        "ext_sys": ext_sys_norm,
     }
 
 def parse_args():
@@ -150,8 +168,9 @@ def get_filtered_stats_src_list(data_collection_scope, ext_sys=DEFAULT_EXT_SYS):
         logging.info(f"PART 모드: {len(target_id_set)} -> {len(stats_src_list)}개 통계 소스 필터링 완료")
     return api_info, stats_src_list, env_target_list
 
-def prepare_data_directories():
-    return create_data_save_directory()
+def prepare_data_directories(ext_sys=DEFAULT_EXT_SYS):
+    """ext_sys 를 전달하여 저장 경로 트리를 준비한다."""
+    return create_data_save_directory(ext_sys=ext_sys)
 
 def save_single_file(args):
     api_info, stats_src, dirs, data_info = args
@@ -250,9 +269,8 @@ def main():
         logging.info(f"수집 외부 시스템: ext_sys={ext_sys}")
         data_collection_scope = get_data_collection_scope()
         api_info, stats_src_list, env_target_list = get_filtered_stats_src_list(data_collection_scope, ext_sys=ext_sys)
-        dirs = prepare_data_directories()
-        # ext_sys 를 dirs 에 실어 save_single_file 어댑터 분기에 활용 (commit#1 진입점 wiring).
-        dirs['ext_sys'] = ext_sys
+        dirs = prepare_data_directories(ext_sys=ext_sys)
+        # dirs['ext_sys'] 는 create_data_save_directory 에서 이미 정규화되어 채워짐.
         stat_tbl_id_list = [s['stat_tbl_id'] for s in stats_src_list]
         ext_api_id = stats_src_list[0]['ext_api_id'] if stats_src_list else None
         stats_src_data_info_dict = get_stats_src_data_info(ext_api_id, stat_tbl_id_list)
