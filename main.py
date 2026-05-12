@@ -9,7 +9,52 @@ from db import get_db_url, get_api_info, get_stats_src_api_info, get_stats_src_d
 from kosis_api import fetch_kosis_data, fetch_kosis_meta, fetch_kosis_latest
 from config import load_target_src_tbl_id_list, get_log_level, get_data_collection_scope, get_parallel_workers_file
 from db_processing import process_db_insertion
+from collectors import BaseCollector, KosisCollector
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+# --- 이슈 #29: ext_sys 기반 멀티소스 라우팅 ---------------------------------
+# 진입점 (main.py) 가 외부 시스템(ext_sys) 인자/환경변수를 받아 알맞은
+# BaseCollector 어댑터로 분기합니다. 기존 KOSIS 단일 경로를 한 번에 일반화하지
+# 않고, KOSIS 를 default 로 묶어 두는 방식으로 후방호환을 보장합니다.
+#
+# - resolve_ext_sys() : 우선순위 CLI --ext-sys > env EXT_SYS > 'KOSIS'
+# - get_collector_class() : ext_sys -> BaseCollector subclass 매핑
+# - _COLLECTOR_REGISTRY : 신규 소스는 이 매핑 한 줄로 등록 가능
+#
+# 설계 근거: docs/design/26-multi-source-architecture.md §5 마이그레이션 플랜
+# 후방호환 전략: §2.4 — KOSIS 호출 경로는 어댑터를 거쳐도 동일한 응답 형태 유지.
+DEFAULT_EXT_SYS = 'KOSIS'
+
+# ext_sys 식별자 -> BaseCollector 서브클래스. 신규 소스 추가 시 한 줄만 더하면 됨.
+_COLLECTOR_REGISTRY = {
+    'KOSIS': KosisCollector,
+}
+
+
+def resolve_ext_sys(cli_value):
+    """ext_sys 우선순위 해석: CLI > env(EXT_SYS) > default 'KOSIS'.
+
+    값은 항상 대문자로 정규화하여 sys_ext_api_info.ext_sys 와 일치하도록 한다.
+    """
+    if cli_value:
+        return cli_value.upper()
+    env_value = os.getenv('EXT_SYS')
+    if env_value:
+        return env_value.upper()
+    return DEFAULT_EXT_SYS
+
+
+def get_collector_class(ext_sys):
+    """ext_sys 키에 등록된 BaseCollector subclass 를 반환.
+
+    미등록 ext_sys 는 ValueError. 새 소스 추가는 _COLLECTOR_REGISTRY 한 줄 + 새 어댑터 모듈.
+    """
+    cls = _COLLECTOR_REGISTRY.get(ext_sys.upper())
+    if cls is None:
+        raise ValueError(f"Unsupported ext_sys: {ext_sys!r}. registered: {list(_COLLECTOR_REGISTRY)}")
+    return cls
+
 
 def setup_logging():
     log_dir = 'logs'
@@ -58,8 +103,14 @@ def create_data_save_directory():
     }
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='KOSIS 데이터 API 연동 툴')
+    parser = argparse.ArgumentParser(description='외부 통계 API 연동 툴 (KOSIS 등 멀티소스 지원)')
     parser.add_argument('--mode', choices=['file', 'db'], required=True, help='file: 파일 저장만, db: 파일 저장 후 DB 삽입')
+    parser.add_argument(
+        '--ext-sys',
+        dest='ext_sys',
+        default=None,
+        help='외부 시스템 식별자 (예: KOSIS). 미지정 시 환경변수 EXT_SYS, 그래도 없으면 KOSIS 사용.'
+    )
     return parser.parse_args()
 
 def check_required_env_and_args(args):
@@ -72,9 +123,10 @@ def check_required_env_and_args(args):
         print("[ERROR] DB_URL 환경변수가 설정되어 있지 않습니다. .env 파일을 확인하세요.")
         sys.exit(1)
 
-def get_filtered_stats_src_list(data_collection_scope):
-    # default ext_sys='KOSIS' 사용 (이슈 #27 후방호환 — 인자 미지정 시 KOSIS 경로)
-    api_info = get_api_info()
+def get_filtered_stats_src_list(data_collection_scope, ext_sys=DEFAULT_EXT_SYS):
+    # 이슈 #27: get_api_info / get_stats_src_api_info 가 ext_sys 인자를 받도록 일반화됨.
+    # default ext_sys='KOSIS' 사용 시 기존 KOSIS 경로와 동일 동작 (후방호환).
+    api_info = get_api_info(ext_sys)
     stats_src_list = get_stats_src_api_info(api_info.get('ext_api_id'))
     env_target_list = None
     if data_collection_scope == 'PART':
@@ -112,16 +164,24 @@ def save_single_file(args):
     to_str = str(_end)[:4] if str(_end) not in ('unknown', '', 'None') else 'unknown'
     meta_format = 'xml'
     func_name = 'save_single_file'
+
+    # 이슈 #29: BaseCollector 어댑터를 통해 ext_sys 별로 수집 호출 분기.
+    # KOSIS 의 경우 KosisCollector 가 기존 fetch_kosis_* 함수들을 동일 시그니처로 위임 호출하므로
+    # 응답 형식/오류 동작이 그대로 보존된다 (#28 어댑터에서 검증).
+    ext_sys = dirs.get('ext_sys', DEFAULT_EXT_SYS) if isinstance(dirs, dict) else DEFAULT_EXT_SYS
+    collector_cls = get_collector_class(ext_sys)
+    collector = collector_cls(api_info=api_info, stats_src=stats_src)
+
     try:
-        logging.info(f"[{stat_tbl_id}] {func_name} - 메타 파일 저장 시작")
+        logging.info(f"[{stat_tbl_id}] {func_name} - 메타 파일 저장 시작 (ext_sys={ext_sys})")
         if stats_src.get('api_meta_url'):
             try:
                 meta_url_info = json.loads(stats_src['api_meta_url'])
                 meta_format = meta_url_info.get('format', 'xml')
             except Exception as e:
                 logging.debug(f"[{stat_tbl_id}] {func_name} - api_meta_url 파싱 실패: {e}")
-        meta = fetch_kosis_meta(api_info, stats_src, data_info)
-        logging.debug(f"[{stat_tbl_id}] {func_name} - fetch_kosis_meta 결과: {str(meta)[:200]}")
+        meta = collector.fetch_meta(data_info)
+        logging.debug(f"[{stat_tbl_id}] {func_name} - fetch_meta 결과: {str(meta)[:200]}")
         meta_path = save_meta_file(meta, stats_src, dirs['meta'], src_data_id, stat_title, from_str, to_str, meta_format)
         logging.info(f"[{stat_tbl_id}] {func_name} - 메타 파일 저장 완료: {meta_path}")
 
@@ -133,8 +193,8 @@ def save_single_file(args):
                 latest_format = latest_url_info.get('format', 'json')
             except Exception as e:
                 logging.debug(f"[{stat_tbl_id}] {func_name} - api_latest_chn_dt_url 파싱 실패: {e}")
-        latest = fetch_kosis_latest(api_info, stats_src, data_info)
-        logging.debug(f"[{stat_tbl_id}] {func_name} - fetch_kosis_latest 결과: {str(latest)[:200]}")
+        latest = collector.fetch_latest(data_info)
+        logging.debug(f"[{stat_tbl_id}] {func_name} - fetch_latest 결과: {str(latest)[:200]}")
         latest_path = save_latest_file(latest, stats_src, dirs['latest'], src_data_id, stat_title, from_str, to_str, latest_format)
         logging.info(f"[{stat_tbl_id}] {func_name} - latest 파일 저장 완료: {latest_path}")
 
@@ -146,8 +206,8 @@ def save_single_file(args):
                 data_format = data_url_info.get('format', 'json')
             except Exception as e:
                 logging.debug(f"[{stat_tbl_id}] {func_name} - api_data_url 파싱 실패: {e}")
-        data = fetch_kosis_data(api_info, stats_src, data_info)
-        logging.debug(f"[{stat_tbl_id}] {func_name} - fetch_kosis_data 결과: {str(data)[:200]}")
+        data = collector.fetch_data(data_info)
+        logging.debug(f"[{stat_tbl_id}] {func_name} - fetch_data 결과: {str(data)[:200]}")
         data_path = save_data_file(data, stats_src, dirs['data'], src_data_id, stat_title, from_str, to_str, data_format)
         logging.info(f"[{stat_tbl_id}] {func_name} - 데이터 파일 저장 완료: {data_path}")
         return {
@@ -158,6 +218,7 @@ def save_single_file(args):
             'ext_api_id': api_info.get('ext_api_id'),
             'stat_api_id': stats_src.get('stat_api_id'),
             'src_data_id': src_data_id,
+            'ext_sys': ext_sys,
         }
     except Exception as e:
         logging.error(f"[{stat_tbl_id}] {func_name} - 파일 저장 중 에러: {e}", exc_info=True)
@@ -185,20 +246,24 @@ def main():
     try:
         args = parse_args()
         check_required_env_and_args(args)
+        ext_sys = resolve_ext_sys(getattr(args, 'ext_sys', None))
+        logging.info(f"수집 외부 시스템: ext_sys={ext_sys}")
         data_collection_scope = get_data_collection_scope()
-        api_info, stats_src_list, env_target_list = get_filtered_stats_src_list(data_collection_scope)
+        api_info, stats_src_list, env_target_list = get_filtered_stats_src_list(data_collection_scope, ext_sys=ext_sys)
         dirs = prepare_data_directories()
+        # ext_sys 를 dirs 에 실어 save_single_file 어댑터 분기에 활용 (commit#1 진입점 wiring).
+        dirs['ext_sys'] = ext_sys
         stat_tbl_id_list = [s['stat_tbl_id'] for s in stats_src_list]
         ext_api_id = stats_src_list[0]['ext_api_id'] if stats_src_list else None
         stats_src_data_info_dict = get_stats_src_data_info(ext_api_id, stat_tbl_id_list)
-        
+
         saved_files_info = save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict)
 
         if args.mode == 'db':
             logging.info("DB 삽입 모드를 시작합니다.")
             process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_data_info_dict)
             logging.info("DB 삽입/수정 작업이 성공적으로 완료되었습니다.")
-        
+
         logging.info("모든 작업이 성공적으로 완료되었습니다.")
 
     except Exception as e:
@@ -207,4 +272,4 @@ def main():
         sys.exit(1)
 
 if __name__ == '__main__':
-    main() 
+    main()
