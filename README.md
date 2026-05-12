@@ -1,7 +1,9 @@
-# KOSIS 데이터 API 연동 및 파일/DB 저장 툴
+# 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
 
 ## 개요
-KOSIS(국가통계포털) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
+외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
+
+> 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
 
 ## 주요 기능
 - DB에서 KOSIS API 연동 정보 조회
@@ -13,16 +15,32 @@ KOSIS(국가통계포털) 데이터를 API를 통해 수집하여, 옵션에 따
 
 ## 실행 방법
 ```bash
-python main.py --mode file   # 파일 저장만
-python main.py --mode db     # 파일 저장 + DB 삽입
+# KOSIS (default, 후방호환)
+python main.py --mode file
+python main.py --mode db
+
+# 다른 외부 소스 (예: 공공데이터포털)
+python main.py --mode file --ext-sys DATA_GO_KR
+# 또는 환경변수로
+EXT_SYS=DATA_GO_KR python main.py --mode db
 ```
 
 ## 실행 옵션
 - `--mode file` : API 데이터 파일로만 저장
 - `--mode db`   : API 데이터 파일 저장 후 DB 삽입
+- `--ext-sys <KEY>` : 외부 시스템 식별자 (예: `KOSIS`, `DATA_GO_KR`). 미지정 시 `EXT_SYS` 환경변수, 그래도 없으면 `KOSIS`.
+
+### ext_sys 우선순위
+```
+CLI(--ext-sys)  >  env(EXT_SYS)  >  default 'KOSIS'
+```
+값은 항상 대문자로 정규화되어 `sys_ext_api_info.ext_sys` 와 매칭됩니다.
 
 ## 파일 저장 규칙
 - 실행 위치 기준, 오늘 날짜(YYYYMMDD) 폴더 생성
+- 디렉터리 패턴 (이슈 #29):
+    - KOSIS (default): `kosis_data/<YYYYMMDD>/{data,meta,latest}` (기존 패턴 그대로 유지 — 후방호환)
+    - 그 외 ext_sys: `ext_data/<EXT_SYS>/<YYYYMMDD>/{data,meta,latest}`
 - 파일명 예시:
     - Data: `{순서}-{stat_title}-{from_year}-{to_year}_{yyyyMMddHHmmss}.json`
     - Meta: `{순서}-{stat_title}-{from_year}-{to_year}_{yyyyMMddHHmmss}.xml`
@@ -93,6 +111,7 @@ cp .env.example .env
 
 | 변수명 | 필수 | 기본값 | 허용값 | 설명 |
 |--------|:----:|--------|--------|------|
+| `EXT_SYS` | — | `KOSIS` | `KOSIS` `DATA_GO_KR` ... | 수집 대상 외부 시스템 (CLI `--ext-sys` 가 우선) |
 | `DB_URL` | ✅ | — | `postgresql://...` | PostgreSQL 접속 URL |
 | `DB_BATCH_SIZE` | — | `100` | 정수 | DB 배치 삽입 크기 |
 | `LOG_LEVEL` | — | `INFO` | `DEBUG` `INFO` `WARNING` `ERROR` | 로그 출력 레벨 |
