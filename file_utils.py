@@ -4,8 +4,6 @@ from datetime import datetime
 import logging
 import re
 
-g_File_date_format = '%Y.%m.%d.%H%M%S'
-
 def safe_filename(filename, max_length=100):
     # 파일명에 사용할 수 없는 문자 제거/치환
     filename = re.sub(r'[\\/:*?"<>|]', '_', filename)
@@ -13,25 +11,6 @@ def safe_filename(filename, max_length=100):
     if len(filename) > max_length:
         filename = filename[:max_length]
     return filename
-
-def save_data_and_meta_files(idx, data, meta, stats_src, folder):
-    now = datetime.now()
-    stat_title = safe_filename(stats_src.get('stat_title', 'unknown'))
-    stat_tbl_id = safe_filename(str(stats_src.get('stat_tbl_id', 'unknown')))
-    data_time = now.strftime(g_File_date_format)
-    meta_time = now.strftime(g_File_date_format)
-    data_filename = f"{idx}.data_{stat_title}_{stat_tbl_id}_{data_time}.json"
-    meta_filename = f"{idx}.meta_{stat_title}_{stat_tbl_id}_{meta_time}.xml"
-    data_path = os.path.join(folder, data_filename)
-    meta_path = os.path.join(folder, meta_filename)
-    with open(data_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    with open(meta_path, 'w', encoding='utf-8') as f:
-        if meta_filename.endswith('.json'):
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-        else:
-            f.write(str(meta))
-    return data_path, meta_path 
 
 def save_meta_file(meta, stats_src, meta_dir, src_data_id, stat_title, from_year, to_year, file_format):
     now = datetime.now()

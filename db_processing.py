@@ -552,7 +552,6 @@ def cleanup_old_data(api_info, stats_src_list, stats_src_data_info_dict):
                 logging.warning(f"[{stat_tbl_id}] stat_latest_chn_dt가 NULL입니다. 과거 데이터 삭제를 건너뜁니다.")
                 continue
                 
-            src_latest_chn_dt = latest_chn_dt  # 보통 동일
 
             # 1. stats_kosis_origin_data, stats_kosis_metadata_code
             for tbl, col in [('stats_kosis_origin_data', 'stat_latest_chn_dt'),
@@ -582,10 +581,3 @@ def cleanup_old_data(api_info, stats_src_list, stats_src_data_info_dict):
         logging.error(f"과거 데이터 삭제 중 에러: {e}", exc_info=True)
     finally:
         session.close()
-
-# 세부 단계별 함수들 (추후 구현)
-# def _parse_latest_file(...)
-# def _insert_origin_data(...)
-# def _transfer_to_integration_table(...)
-# def _insert_metadata(...)
-# def _update_management_tables(...) 
