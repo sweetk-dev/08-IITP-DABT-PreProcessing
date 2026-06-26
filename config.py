@@ -14,8 +14,6 @@ _LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 
 # --- KOSIS API 설정 ---
 _EXT_API_INFO_KOSIS_SYS = os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS')
-_MAX_KOSIS_API_GET_DATA_CNT = int(os.getenv('MAX_KOSIS_API_GET_DATA_CNT', '40000'))
-_KOSIS_SYS = os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS').upper()
 
 # --- 병렬처리 성능 설정 ---
 _PARALLEL_WORKERS_FILE = int(os.getenv('PARALLEL_WORKERS_FILE', '4'))
@@ -61,8 +59,6 @@ def get_parallel_workers_file():
 def get_parallel_workers_db():
     return min(_PARALLEL_WORKERS_DB, 5)
 
-def  get_max_kosis_api_get_data_cnt():
-    return _MAX_KOSIS_API_GET_DATA_CNT
 
 # 여러 줄 섹션 기반 테이블 ID 리스트 로드 함수
 def load_target_src_tbl_id_list(env_path='.env'):
