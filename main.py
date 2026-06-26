@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # preserved: with ext_sys defaulting to 'KOSIS', the legacy save path and the
 # collector behavior are identical to v1.4.0.
 # ============================================================================
-__version__ = "1.5.3"
+__version__ = "1.6.0"
 
 
 
@@ -300,38 +300,101 @@ def save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict):
             saved_files_info.append(result)
     return saved_files_info
 
+def write_run_summary(summary):
+    """실행 1회를 한 줄로 logs/run_summary.log 에 누적 기록(스케줄러 추적용). 기존 로그는 그대로 유지."""
+    log_dir = 'logs'
+    os.makedirs(log_dir, exist_ok=True)
+    path = os.path.join(log_dir, 'run_summary.log')
+    line = (
+        f"{summary.get('start')} ~ {summary.get('end')} | ext_sys={summary.get('ext_sys')} "
+        f"| mode={summary.get('mode')} | targets={summary.get('targets')} "
+        f"| files_ok={summary.get('files_ok')} | db_ok={summary.get('db_ok')} db_fail={summary.get('db_fail')} "
+        f"| dur={summary.get('duration_sec')}s | status={summary.get('status')}"
+    )
+    if summary.get('error'):
+        line += f" | error={summary.get('error')}"
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(line + '\n')
+    logging.info(f"run-summary: {line}")
+
+
 def main():
     setup_logging()
+    started = datetime.now()
+    summary = {
+        'start': started.strftime('%Y-%m-%d %H:%M:%S'),
+        'ext_sys': None, 'mode': None, 'targets': 0,
+        'files_ok': 0, 'db_ok': 0, 'db_fail': 0,
+        'status': 'ERROR', 'error': None,
+    }
+    exit_code = 1
     try:
         args = parse_args()
+        summary['mode'] = args.mode
         check_required_env_and_args(args)
         ext_sys = resolve_ext_sys(getattr(args, 'ext_sys', None))
+        summary['ext_sys'] = ext_sys
         logging.info(f"수집 외부 시스템: ext_sys={ext_sys}")
         data_collection_scope = get_data_collection_scope()
         if data_collection_scope not in ALLOWED_DATA_COLLECTION_SCOPES:
-            logging.error("잘못된 DATA_COLLECTION_SCOPE: %s (허용: ALL, PARTIAL)" % data_collection_scope)
-            print("[ERROR] DATA_COLLECTION_SCOPE 는 ALL 또는 PARTIAL 만 가능합니다. (현재: %s)" % data_collection_scope)
-            sys.exit(1)
+            raise ValueError(
+                "DATA_COLLECTION_SCOPE 는 ALL 또는 PARTIAL 만 가능합니다. (현재: %s)" % data_collection_scope
+            )
         api_info, stats_src_list, env_target_list = get_filtered_stats_src_list(data_collection_scope, ext_sys=ext_sys)
         dirs = prepare_data_directories(ext_sys=ext_sys)
         # dirs['ext_sys'] 는 create_data_save_directory 에서 이미 정규화되어 채워짐.
         stat_tbl_id_list = [s['stat_tbl_id'] for s in stats_src_list]
+        summary['targets'] = len(stat_tbl_id_list)
         ext_api_id = stats_src_list[0]['ext_api_id'] if stats_src_list else None
         stats_src_data_info_dict = get_stats_src_data_info(ext_api_id, stat_tbl_id_list)
 
         saved_files_info = save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict)
+        summary['files_ok'] = len(saved_files_info)
 
         if args.mode == 'db':
             logging.info("DB 삽입 모드를 시작합니다.")
-            process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_data_info_dict)
-            logging.info("DB 삽입/수정 작업이 성공적으로 완료되었습니다.")
+            db_result = process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_data_info_dict)
+            summary['db_ok'] = len(db_result.get('succeeded', []))
+            failed = db_result.get('failed', [])
+            summary['db_fail'] = len(failed)
+            if failed:
+                summary['status'] = 'PARTIAL'
+                summary['error'] = "db_fail:" + ",".join(str(f[0]) for f in failed)
+                exit_code = 2
+                logging.error("일부 통계 적재 실패 — 부분 완료(종료코드 2).")
+            else:
+                summary['status'] = 'SUCCESS'
+                exit_code = 0
+                logging.info("DB 삽입/수정 작업이 성공적으로 완료되었습니다.")
+        else:
+            summary['status'] = 'SUCCESS'
+            exit_code = 0
 
-        logging.info("모든 작업이 성공적으로 완료되었습니다.")
+        logging.info("모든 작업이 완료되었습니다.")
 
+    except SystemExit as e:
+        # check_required_env_and_args 등에서의 명시적 종료
+        code = e.code if isinstance(e.code, int) else 1
+        summary['status'] = 'ERROR'
+        summary['error'] = f"exit:{code}"
+        exit_code = code
     except Exception as e:
         logging.error(f"예상치 못한 에러 발생: {e}", exc_info=True)
         print(f"[ERROR] 실행 중 예기치 않은 에러가 발생했습니다: {e}")
-        sys.exit(1)
+        summary['status'] = 'ERROR'
+        summary['error'] = str(e)[:300]
+        exit_code = 1
+    finally:
+        ended = datetime.now()
+        summary['end'] = ended.strftime('%Y-%m-%d %H:%M:%S')
+        summary['duration_sec'] = int((ended - started).total_seconds())
+        try:
+            write_run_summary(summary)
+        except Exception as _e:
+            logging.error(f"run-summary 기록 실패: {_e}")
+
+    sys.exit(exit_code)
+
 
 if __name__ == '__main__':
     main()
