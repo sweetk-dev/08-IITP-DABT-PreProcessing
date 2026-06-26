@@ -1,6 +1,6 @@
 # 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
 
-![version](https://img.shields.io/badge/version-v1.5.3-blue)
+![version](https://img.shields.io/badge/version-v1.6.0-blue)
 
 ## 개요
 외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
@@ -142,6 +142,18 @@ DB_BATCH_SIZE=200
 - **과거 데이터 관리**: 자동으로 이전 버전 데이터 정리
 - **에러 처리**: 필수 테이블 누락 시 프로그램 중단
 - **로그 관리**: 실행 로그는 `logs/` 폴더에 날짜별 저장
+
+## 스케줄러 실행 (정기 수집)
+
+정기 수집은 OS 스케줄러(cron)로 `scripts/run_collect.sh` 를 호출합니다. 래퍼는 단일 인스턴스(flock)를 보장하고, 프로젝트 루트를 자동 탐지하며, `.venv` 가 있으면 활성화한 뒤 `python main.py --mode db` 를 실행합니다.
+
+```bash
+# crontab 예시 — 매월 3일/18일 03:00 (시스템 타임존 기준)
+0 3 3,18 * * <PROJECT_DIR>/scripts/run_collect.sh >> <PROJECT_DIR>/logs/cron.log 2>&1
+```
+
+- 종료 코드: `0` 성공 / `2` 일부 통계 적재 실패(부분 완료) / `1` 치명적 오류
+- 실행 요약: 매 실행 1줄이 `logs/run_summary.log` 에 누적됩니다(기존 날짜별 로그는 그대로 유지).
 
 ## 참고
 - Python 3.8 이상 권장

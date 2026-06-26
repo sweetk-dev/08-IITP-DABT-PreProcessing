@@ -15,14 +15,15 @@ Session = sessionmaker(bind=engine)
 def process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_data_info_dict):
     """
     저장된 파일들을 기반으로 DB에 데이터를 삽입/수정하는 전체 프로세스를 관리합니다.
-    :param saved_files_info: save_all_files에서 반환된 파일 경로 정보 리스트
-    :param api_info: API 정보
-    :param stats_src_list: 통계 소스 정보 리스트
-    :param stats_src_data_info_dict: 통계 소스 데이터 정보 딕셔너리
+    통계표 단위로 격리 커밋하며, 스레드에서는 종료시키지 않고 예외를 상위로 전달하여
+    성공/실패를 집계합니다. 전체 성공일 때만 동기화 시각 갱신 + 과거데이터 cleanup 을 수행합니다.
+
+    :return: {"succeeded": [stat_tbl_id, ...], "failed": [(stat_tbl_id, error), ...]}
     """
     logging.info("DB 삽입/수정 프로세스를 시작합니다.")
 
     parallel_workers = get_parallel_workers_db()
+
     def worker(file_info):
         session = Session()
         try:
@@ -31,26 +32,43 @@ def process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_d
             stats_data_info = stats_src_data_info_dict.get(stat_tbl_id, {})
             process_single_statistic(session, file_info, api_info, stats_src, stats_data_info)
             session.commit()
+            return stat_tbl_id
         except Exception as e:
             session.rollback()
             logging.error(f"DB 처리 중 에러(통계: {file_info['stat_tbl_id']}): {e}", exc_info=True)
-            import sys; sys.exit(1)
+            raise
         finally:
             session.close()
 
+    succeeded = []
+    failed = []
+    with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+        future_map = {executor.submit(worker, fi): fi for fi in saved_files_info}
+        for future in as_completed(future_map):
+            fi = future_map[future]
+            try:
+                future.result()
+                succeeded.append(fi['stat_tbl_id'])
+            except Exception as e:
+                failed.append((fi['stat_tbl_id'], str(e)))
+
+    if failed:
+        logging.error(
+            f"DB 처리 실패 {len(failed)}건 / 성공 {len(succeeded)}건. "
+            f"실패 통계: {[f[0] for f in failed]} — 동기화 시각 갱신/cleanup 보류."
+        )
+        return {"succeeded": succeeded, "failed": failed}
+
+    # 전체 성공 시에만 시스템 전체 동기화 시각 갱신(세션 누수 방지 위해 try/finally close)
+    sync_session = Session()
     try:
-        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-            futures = [executor.submit(worker, file_info) for file_info in saved_files_info]
-            for future in as_completed(futures):
-                future.result()  # 예외 발생 시 raise
-        # 모든 통계 성공 후에만 시스템 전체 동기화 시각 갱신
-        _update_sys_ext_api_info(Session(), api_info.get('ext_api_id'))
-        logging.info("DB 처리가 성공적으로 완료되었습니다.")
-        # 모든 데이터 커밋 후 cleanup 실행
-        cleanup_old_data(api_info, stats_src_list, stats_src_data_info_dict)
-    except Exception as e:
-        logging.error(f"DB 처리 중 에러가 발생하여 롤백합니다: {e}", exc_info=True)
-        import sys; sys.exit(1)
+        _update_sys_ext_api_info(sync_session, api_info.get('ext_api_id'))
+    finally:
+        sync_session.close()
+    logging.info("DB 처리가 성공적으로 완료되었습니다.")
+    # 모든 데이터 커밋 후 cleanup 실행
+    cleanup_old_data(api_info, stats_src_list, stats_src_data_info_dict)
+    return {"succeeded": succeeded, "failed": []}
 
 def process_single_statistic(session, file_info, api_info, stats_src, stats_data_info):
     """
