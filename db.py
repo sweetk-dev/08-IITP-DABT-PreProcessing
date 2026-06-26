@@ -1,5 +1,4 @@
 import logging
-import os
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
