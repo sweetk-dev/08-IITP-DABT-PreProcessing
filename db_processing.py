@@ -269,6 +269,7 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
         WHERE src_data_id = :src_data_id
           AND tbl_id = :stat_tbl_id
           AND stat_latest_chn_dt = :stat_latest_chn_dt
+          AND prd_de ~ '^[0-9]+$'   -- 빈/비숫자 period 행 제외(CAST 실패 방지)
         """
     else:
         # dt는 숫자로 변환, '-' 또는 ''일 경우 0으로 변환
@@ -290,6 +291,7 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
         WHERE src_data_id = :src_data_id
           AND tbl_id = :stat_tbl_id
           AND stat_latest_chn_dt = :stat_latest_chn_dt
+          AND prd_de ~ '^[0-9]+$'   -- 빈/비숫자 period 행 제외(CAST 실패 방지)
         """
     session.execute(
         text(insert_sql),
