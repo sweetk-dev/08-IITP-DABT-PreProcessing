@@ -7,7 +7,12 @@ from config import get_db_url, get_kosis_sys
 load_dotenv()
 
 DB_URL = get_db_url()
-engine = create_engine(DB_URL) if DB_URL else None
+engine = create_engine(
+    DB_URL,
+    pool_pre_ping=True,      # 끊긴 커넥션 자동 감지(원격 DB 일시 단절 대비)
+    pool_recycle=1800,       # 30분마다 커넥션 재생성(stale 방지)
+    connect_args={'connect_timeout': 10},
+) if DB_URL else None
 Session = sessionmaker(bind=engine) if engine else None
 
 db_logger = logging.getLogger('db')
