@@ -395,9 +395,11 @@ def _update_stats_src_data_info(session, file_info, data_json, latest_date):
     updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     updated_by = 'SYS-BATCH'
     # avail_cat_cols: data_json에서 실제 값이 존재하는 c1~c4만 추출
+    # 단일 dict 응답(KOSIS 단건)도 리스트로 정규화하고, dict 아닌 요소는 건너뜀
+    rows_iter = data_json if isinstance(data_json, list) else [data_json]
     cat_cols = []
     for c in ['c1', 'c2', 'c3', 'c4']:
-        if any((row.get(c.upper()) or row.get(c)) for row in data_json):
+        if any(isinstance(row, dict) and (row.get(c.upper()) or row.get(c)) for row in rows_iter):
             cat_cols.append(c)
     avail_cat_cols = pyjson.dumps(cat_cols, ensure_ascii=False)
     update_sql = """
