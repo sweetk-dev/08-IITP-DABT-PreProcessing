@@ -1,6 +1,16 @@
 import json
+import re
 import requests
 import logging
+
+# (connect, read) 타임아웃 — 서버 무응답 시 무한 대기 방지
+HTTP_TIMEOUT = (5, 60)
+
+def mask_auth_in_url(url):
+    """로그 출력용 URL 인증키 마스킹"""
+    if not url:
+        return url
+    return re.sub(r'(apiKey=)[^&]+', r'\1***', url, flags=re.IGNORECASE)
 
 def build_kosis_url(api_info, stats_src, stats_src_data_info, url_key, from_year=None, to_year=None):
     """
@@ -46,10 +56,10 @@ def fetch_kosis_data_single(api_info, stats_src, stats_src_data_info, from_year,
         return None
     
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=HTTP_TIMEOUT)
         if response.status_code != 200:
-            logging.error(f'KOSIS data API 요청 실패: status={response.status_code}, url={url}, response={response.text[:200]}')
-            print(f"[ERROR] KOSIS data API 요청 실패: status={response.status_code}, url={url}")
+            logging.error(f'KOSIS data API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}, response={response.text[:200]}')
+            print(f"[ERROR] KOSIS data API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}")
             raise RuntimeError("KOSIS API 요청 실패")
     except Exception as e:
         logging.error(f'KOSIS data API 요청 중 예외 발생: {e}', exc_info=True)
@@ -128,10 +138,10 @@ def fetch_kosis_meta(api_info, stats_src, stats_src_data_info):
         logging.error('KOSIS meta url 생성 실패')
         return None
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=HTTP_TIMEOUT)
         if response.status_code != 200:
-            logging.error(f'KOSIS meta API 요청 실패: status={response.status_code}, url={url}, response={response.text[:200]}')
-            print(f"[ERROR] KOSIS meta API 요청 실패: status={response.status_code}, url={url}")
+            logging.error(f'KOSIS meta API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}, response={response.text[:200]}')
+            print(f"[ERROR] KOSIS meta API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}")
             raise RuntimeError("KOSIS API 요청 실패")
     except Exception as e:
         logging.error(f'KOSIS meta API 요청 중 예외 발생: {e}', exc_info=True)
@@ -148,10 +158,10 @@ def fetch_kosis_latest(api_info, stats_src, stats_src_data_info):
         logging.error('KOSIS latest url 생성 실패')
         return None
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=HTTP_TIMEOUT)
         if response.status_code != 200:
-            logging.error(f'KOSIS latest API 요청 실패: status={response.status_code}, url={url}, response={response.text[:200]}')
-            print(f"[ERROR] KOSIS latest API 요청 실패: status={response.status_code}, url={url}")
+            logging.error(f'KOSIS latest API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}, response={response.text[:200]}')
+            print(f"[ERROR] KOSIS latest API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}")
             raise RuntimeError("KOSIS API 요청 실패")
     except Exception as e:
         logging.error(f'KOSIS latest API 요청 중 예외 발생: {e}', exc_info=True)
