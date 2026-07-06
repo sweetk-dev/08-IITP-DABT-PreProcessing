@@ -15,12 +15,20 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Union
 
 import requests
+
+
+def _mask_url(url):
+    """로그 출력용 URL 인증키 마스킹"""
+    if not url:
+        return url
+    return re.sub(r"(apiKey=)[^&]+", r"\1***", str(url), flags=re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +114,7 @@ class BaseCollector(ABC):
                 logger.warning(
                     "%s GET %s failed status=%s body=%s",
                     self.EXT_SYS or "BASE",
-                    url,
+                    _mask_url(url),
                     resp.status_code,
                     resp.text[:200],
                 )
@@ -119,7 +127,7 @@ class BaseCollector(ABC):
                 logger.warning(
                     "%s GET %s exception attempt=%d/%d: %s",
                     self.EXT_SYS or "BASE",
-                    url,
+                    _mask_url(url),
                     attempt,
                     attempts,
                     exc,
