@@ -9,6 +9,11 @@ from db import get_db_url, get_api_info, get_stats_src_api_info, get_stats_src_d
 from config import load_target_src_tbl_id_list, get_log_level, get_data_collection_scope, get_parallel_workers_file
 from db_processing import process_db_insertion
 from collectors import KosisCollector
+from collectors.gbis import GbisCollector
+from collectors.korail_conv import KorailConvCollector
+from collectors.kowsi_facl import KowsiFaclCollector
+from collectors.tour_bf import TourBfCollector
+from mobility_pipeline import MOBILITY_EXT_SYS, run_mobility
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -21,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # preserved: with ext_sys defaulting to 'KOSIS', the legacy save path and the
 # collector behavior are identical to v1.4.0.
 # ============================================================================
-__version__ = "1.6.2"
+__version__ = "1.7.0"
 
 
 
@@ -44,6 +49,11 @@ ALLOWED_DATA_COLLECTION_SCOPES = ('ALL', 'PARTIAL')
 # ext_sys 식별자 -> BaseCollector 서브클래스. 신규 소스 추가 시 한 줄만 더하면 됨.
 _COLLECTOR_REGISTRY = {
     'KOSIS': KosisCollector,
+    # 이슈 #76: 이동편의 소스 4종 — 실행 흐름은 mobility_pipeline.run_mobility() 로 위임
+    'GBIS': GbisCollector,
+    'KORAIL_CONV': KorailConvCollector,
+    'KOWSI_FACL': KowsiFaclCollector,
+    'TOUR_BF_API': TourBfCollector,
 }
 
 
@@ -335,40 +345,52 @@ def main():
         ext_sys = resolve_ext_sys(getattr(args, 'ext_sys', None))
         summary['ext_sys'] = ext_sys
         logging.info(f"수집 외부 시스템: ext_sys={ext_sys}")
-        data_collection_scope = get_data_collection_scope()
-        if data_collection_scope not in ALLOWED_DATA_COLLECTION_SCOPES:
-            raise ValueError(
-                "DATA_COLLECTION_SCOPE 는 ALL 또는 PARTIAL 만 가능합니다. (현재: %s)" % data_collection_scope
-            )
-        api_info, stats_src_list, env_target_list = get_filtered_stats_src_list(data_collection_scope, ext_sys=ext_sys)
-        dirs = prepare_data_directories(ext_sys=ext_sys)
-        # dirs['ext_sys'] 는 create_data_save_directory 에서 이미 정규화되어 채워짐.
-        stat_tbl_id_list = [s['stat_tbl_id'] for s in stats_src_list]
-        summary['targets'] = len(stat_tbl_id_list)
-        ext_api_id = stats_src_list[0]['ext_api_id'] if stats_src_list else None
-        stats_src_data_info_dict = get_stats_src_data_info(ext_api_id, stat_tbl_id_list)
 
-        saved_files_info = save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict)
-        summary['files_ok'] = len(saved_files_info)
+        # 이슈 #76: 이동편의 소스는 통계(stats_*) 흐름과 별개 파이프라인으로 위임
+        if ext_sys in MOBILITY_EXT_SYS:
+            mob = run_mobility(ext_sys, args.mode)
+            summary['targets'] = mob['targets']
+            summary['files_ok'] = mob['files_ok']
+            summary['db_ok'] = mob['db_ok']
+            summary['db_fail'] = mob['db_fail']
+            summary['status'] = 'SUCCESS'
+            exit_code = 0
+            logging.info("이동편의 수집 파이프라인 완료 (ext_sys=%s)", ext_sys)
+        else:
+            data_collection_scope = get_data_collection_scope()
+            if data_collection_scope not in ALLOWED_DATA_COLLECTION_SCOPES:
+                raise ValueError(
+                    "DATA_COLLECTION_SCOPE 는 ALL 또는 PARTIAL 만 가능합니다. (현재: %s)" % data_collection_scope
+                )
+            api_info, stats_src_list, env_target_list = get_filtered_stats_src_list(data_collection_scope, ext_sys=ext_sys)
+            dirs = prepare_data_directories(ext_sys=ext_sys)
+            # dirs['ext_sys'] 는 create_data_save_directory 에서 이미 정규화되어 채워짐.
+            stat_tbl_id_list = [s['stat_tbl_id'] for s in stats_src_list]
+            summary['targets'] = len(stat_tbl_id_list)
+            ext_api_id = stats_src_list[0]['ext_api_id'] if stats_src_list else None
+            stats_src_data_info_dict = get_stats_src_data_info(ext_api_id, stat_tbl_id_list)
 
-        if args.mode == 'db':
-            logging.info("DB 삽입 모드를 시작합니다.")
-            db_result = process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_data_info_dict)
-            summary['db_ok'] = len(db_result.get('succeeded', []))
-            failed = db_result.get('failed', [])
-            summary['db_fail'] = len(failed)
-            if failed:
-                summary['status'] = 'PARTIAL'
-                summary['error'] = "db_fail:" + ",".join(str(f[0]) for f in failed)
-                exit_code = 2
-                logging.error("일부 통계 적재 실패 — 부분 완료(종료코드 2).")
+            saved_files_info = save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict)
+            summary['files_ok'] = len(saved_files_info)
+
+            if args.mode == 'db':
+                logging.info("DB 삽입 모드를 시작합니다.")
+                db_result = process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_data_info_dict)
+                summary['db_ok'] = len(db_result.get('succeeded', []))
+                failed = db_result.get('failed', [])
+                summary['db_fail'] = len(failed)
+                if failed:
+                    summary['status'] = 'PARTIAL'
+                    summary['error'] = "db_fail:" + ",".join(str(f[0]) for f in failed)
+                    exit_code = 2
+                    logging.error("일부 통계 적재 실패 — 부분 완료(종료코드 2).")
+                else:
+                    summary['status'] = 'SUCCESS'
+                    exit_code = 0
+                    logging.info("DB 삽입/수정 작업이 성공적으로 완료되었습니다.")
             else:
                 summary['status'] = 'SUCCESS'
                 exit_code = 0
-                logging.info("DB 삽입/수정 작업이 성공적으로 완료되었습니다.")
-        else:
-            summary['status'] = 'SUCCESS'
-            exit_code = 0
 
         logging.info("모든 작업이 완료되었습니다.")
 
