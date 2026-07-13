@@ -14,7 +14,7 @@ if ROOT not in sys.path:
 
 from collectors.gbis import GbisCollector  # noqa: E402
 from collectors.korail_conv import KorailConvCollector, ANYANG_STATIONS  # noqa: E402
-from collectors.kowsi_facl import parse_eval_flags  # noqa: E402
+from collectors.kowsi_facl import parse_eval_flags, check_api_error, KowsiFaclCollector  # noqa: E402
 from collectors.tour_bf import TourBfCollector, flag_from_text  # noqa: E402
 
 
@@ -89,6 +89,70 @@ class KowsiEvalFlagTests(unittest.TestCase):
     def test_empty_eval_info_all_none(self):
         flags = parse_eval_flags(None)
         self.assertTrue(all(v is None for v in flags.values()))
+
+
+class KowsiChunkedScanTests(unittest.TestCase):
+    """Issue #78 — 에러 감지 + 분할 수집 상태 전이."""
+
+    def _collector(self, tmpdir, max_pages, pages):
+        os.environ['KOWSI_STATE_PATH'] = os.path.join(tmpdir, 'state.json')
+        os.environ['KOWSI_MAX_PAGES'] = str(max_pages)
+        os.environ['KOWSI_PAGE_SIZE'] = '2'
+        os.environ['KOWSI_FETCH_EVAL'] = 'OFF'
+        os.environ['DATA_GO_KR_API_KEY'] = 'test-key'
+        c = KowsiFaclCollector(api_info={}, stats_src={})
+        import xml.etree.ElementTree as ET
+
+        def fake_get_xml(url):
+            import re as _re
+            page = int(_re.search(r'pageNo=(\d+)', url).group(1))
+            body = pages[page - 1]
+            return ET.fromstring(body)
+
+        c.get_xml = fake_get_xml
+        return c
+
+    @staticmethod
+    def _page_xml(total, items):
+        servs = ''.join(
+            '<servList><faclInfId>%s</faclInfId><faclNm>%s</faclNm><lcMnad>%s</lcMnad></servList>'
+            % it for it in items
+        )
+        return ('<facInfoList><totalCount>%d</totalCount>%s</facInfoList>' % (total, servs))
+
+    def test_error_response_raises(self):
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(
+            '<facInfoList><resultCode>10</resultCode>'
+            '<resultMessage>INVALID_REQUEST_PARAMETER_ERROR</resultMessage></facInfoList>'
+        )
+        with self.assertRaises(RuntimeError):
+            check_api_error(root)
+
+    def test_chunk_advances_state(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            total = 6  # page_size 2 -> 3 pages
+            pages = [
+                self._page_xml(total, [('1', 'A', '경기도 안양시 1'), ('2', 'B', '서울')]),
+                self._page_xml(total, [('3', 'C', '부산'), ('4', 'D', '경기도 안양시 2')]),
+                self._page_xml(total, [('5', 'E', '대구'), ('6', 'F', '인천')]),
+            ]
+            c = self._collector(tmp, max_pages=2, pages=pages)
+            rows = c.collect()
+            self.assertEqual([r['facl_inf_id'] for r in rows], ['1', '4'])
+            state = json.load(open(os.path.join(tmp, 'state.json'), encoding='utf-8'))
+            self.assertEqual(state['next_page'], 3)
+            self.assertIsNone(state['cycle_completed_at'])
+            # 2회차: p3 스캔 후 완주 처리
+            rows2 = c.collect()
+            self.assertEqual(rows2, [])
+            state = json.load(open(os.path.join(tmp, 'state.json'), encoding='utf-8'))
+            self.assertEqual(state['next_page'], 1)
+            self.assertIsNotNone(state['cycle_completed_at'])
+            # 3회차: 재스캔 주기 미도래 -> skip
+            rows3 = c.collect()
+            self.assertEqual(rows3, [])
 
 
 class TourBfFlagTests(unittest.TestCase):
