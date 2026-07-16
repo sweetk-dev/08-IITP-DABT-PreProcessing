@@ -31,5 +31,13 @@ See ``docs/design/26-multi-source-architecture.md`` §2 for the full contract.
 
 from .base import BaseCollector  # noqa: F401
 from .kosis import KosisCollector  # noqa: F401
+from .mobility_base import MobilityCollector  # noqa: F401
+from .gbis import GbisCollector  # noqa: F401
+from .korail_conv import KorailConvCollector  # noqa: F401
+from .kowsi_facl import KowsiFaclCollector  # noqa: F401
+from .tour_bf import TourBfCollector  # noqa: F401
 
-__all__ = ["BaseCollector", "KosisCollector"]
+__all__ = [
+    "BaseCollector", "KosisCollector", "MobilityCollector",
+    "GbisCollector", "KorailConvCollector", "KowsiFaclCollector", "TourBfCollector",
+]
