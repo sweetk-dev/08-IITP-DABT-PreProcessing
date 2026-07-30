@@ -192,3 +192,66 @@ class RegistryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class KorailCoordTests(unittest.TestCase):
+    """Issue #80 — 역위치 CSV 좌표 보강."""
+
+    def _write_csv(self, tmpdir, name, header, rows, enc='cp949'):
+        import os as _os
+        path = _os.path.join(tmpdir, name)
+        with open(path, 'w', encoding=enc, newline='') as f:
+            f.write(header + '\n')
+            for r in rows:
+                f.write(r + '\n')
+        return path
+
+    def test_norm_station_name(self):
+        from collectors.korail_conv import norm_station_name
+        self.assertEqual(norm_station_name('안양역'), '안양')
+        self.assertEqual(norm_station_name('총신대입구(이수)'), '총신대입구')
+        self.assertEqual(norm_station_name(' 인 덕 원 '), '인덕원')
+        self.assertEqual(norm_station_name('역'), '역')     # 한 글자는 접미 제거 안 함
+        self.assertEqual(norm_station_name(None), '')
+
+    def test_load_station_coords_krna_header(self):
+        import tempfile
+        from collectors.korail_conv import load_station_coords
+        with tempfile.TemporaryDirectory() as d:
+            p = self._write_csv(d, 'line1.csv', '철도운영기관,선명,역명,경도,위도', [
+                '코레일,1호선,안양,126.922647,37.401929',
+                '코레일,1호선,석수,126.902233,37.435161',
+            ])
+            coords = load_station_coords([p])
+        self.assertEqual(coords['안양'], (37.401929, 126.922647))
+        self.assertIn('석수', coords)
+
+    def test_load_station_coords_korail_header_and_merge_files(self):
+        import tempfile
+        from collectors.korail_conv import load_station_coords
+        with tempfile.TemporaryDirectory() as d:
+            p1 = self._write_csv(d, 'a.csv', '지역본부,역명,위도,경도,출입구 개수', [
+                '수도권광역,수원,37.26608,126.999231,6',
+            ])
+            p2 = self._write_csv(d, 'b.csv', '철도운영기관,선명,역명,경도,위도', [
+                '코레일,4호선,범계,126.950752,37.389783',
+                '코레일,4호선,수원,126.999999,37.266100',   # 중복 역명 -> 최초값 유지
+            ])
+            coords = load_station_coords([p1, p2])
+        self.assertEqual(coords['수원'], (37.26608, 126.999231))
+        self.assertEqual(coords['범계'], (37.389783, 126.950752))
+
+    def test_load_station_coords_missing_file_skipped(self):
+        from collectors.korail_conv import load_station_coords
+        self.assertEqual(load_station_coords(['/no/such/file.csv']), {})
+
+    def test_enrich_coords_sets_and_preserves_none(self):
+        rows = [
+            {'stn_cd': '1', 'stn_name': '안양'},
+            {'stn_cd': '2', 'stn_name': '미지역'},
+        ]
+        hit, miss = KorailConvCollector.enrich_coords(
+            rows, {'안양': (37.401929, 126.922647)})
+        self.assertEqual((hit, miss), (1, 1))
+        self.assertEqual(rows[0]['latitude'], 37.401929)
+        self.assertIsNone(rows[1]['latitude'])     # 미매칭은 None (COALESCE 보존 대상)
