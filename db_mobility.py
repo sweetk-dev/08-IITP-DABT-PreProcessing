@@ -70,21 +70,52 @@ def upsert_bus_routes(rows: List[dict]) -> int:
 
 
 def upsert_station_access(rows: List[dict]) -> int:
+    """좌표(latitude/longitude)는 Issue #80 보강분 — 역위치 CSV 미매칭 역(None)은
+    COALESCE 로 기존값을 보존한다(임시 보강 좌표를 재수집이 지우지 않도록)."""
     sql = (
         "INSERT INTO poi_station_access_status ("
         " stn_cd, stn_name, elevator_cnt, escalator_cnt, wheelchair_lift_cnt,"
         " dis_slope_yn, dis_toilet_yn, gen_toilet_yn, nursing_room_yn, info_center_yn,"
-        " anyang_yn, base_dt, created_by)"
+        " latitude, longitude, anyang_yn, base_dt, created_by)"
         " VALUES (:stn_cd, :stn_name, :elevator_cnt, :escalator_cnt, :wheelchair_lift_cnt,"
         " :dis_slope_yn, :dis_toilet_yn, :gen_toilet_yn, :nursing_room_yn, :info_center_yn,"
-        " :anyang_yn, CAST(:base_dt AS date), :created_by)"
+        " :latitude, :longitude, :anyang_yn, CAST(:base_dt AS date), :created_by)"
         " ON CONFLICT (stn_cd) DO UPDATE SET"
         " stn_name=EXCLUDED.stn_name, elevator_cnt=EXCLUDED.elevator_cnt,"
         " escalator_cnt=EXCLUDED.escalator_cnt, wheelchair_lift_cnt=EXCLUDED.wheelchair_lift_cnt,"
         " dis_slope_yn=EXCLUDED.dis_slope_yn, dis_toilet_yn=EXCLUDED.dis_toilet_yn,"
         " gen_toilet_yn=EXCLUDED.gen_toilet_yn, nursing_room_yn=EXCLUDED.nursing_room_yn,"
-        " info_center_yn=EXCLUDED.info_center_yn, anyang_yn=EXCLUDED.anyang_yn,"
+        " info_center_yn=EXCLUDED.info_center_yn,"
+        " latitude=COALESCE(EXCLUDED.latitude, poi_station_access_status.latitude),"
+        " longitude=COALESCE(EXCLUDED.longitude, poi_station_access_status.longitude),"
+        " anyang_yn=EXCLUDED.anyang_yn,"
         " base_dt=EXCLUDED.base_dt, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+    )
+    for row in rows:
+        row.setdefault('latitude', None)
+        row.setdefault('longitude', None)
+    return _execute_batch(sql, rows)
+
+
+def fetch_station_names() -> List[dict]:
+    """poi_station_access_status 의 (stn_cd, stn_name, latitude) — 좌표 갱신 매칭용."""
+    if engine is None:
+        raise RuntimeError('DB engine not configured (DB_URL)')
+    with engine.begin() as conn:
+        rows = conn.execute(text(
+            "SELECT stn_cd, stn_name, latitude FROM poi_station_access_status"
+            " WHERE del_yn = 'N'"
+        )).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def update_station_coords(rows: List[dict]) -> int:
+    """좌표만 갱신 (전체 재수집 없이) — rows: [{stn_cd, latitude, longitude}]."""
+    sql = (
+        "UPDATE poi_station_access_status SET"
+        " latitude=:latitude, longitude=:longitude,"
+        " updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+        " WHERE stn_cd=:stn_cd"
     )
     return _execute_batch(sql, rows)
 
