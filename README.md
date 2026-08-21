@@ -1,11 +1,13 @@
 # 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
 
-![version](https://img.shields.io/badge/version-v1.8.0-blue)
+![version](https://img.shields.io/badge/version-v1.9.0-blue)
 
 ## 개요
 외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
+
+> 이슈 #85 (v1.9.0) — GBIS 수집이 노선 메타에 이어 **경유정류소(정류장 좌표 + 노선-정류장 관계)** 까지 처리한다. 적재 테이블은 `tran_bus_route_info` / `tran_bus_station_info` / `tran_bus_route_station` 3종. 노선 메타만 갱신하려면 `GBIS_COLLECT_STATIONS=false`.
 
 ## 주요 기능
 - DB에서 KOSIS API 연동 정보 조회
