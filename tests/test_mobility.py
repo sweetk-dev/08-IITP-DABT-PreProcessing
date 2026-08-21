@@ -1,4 +1,4 @@
-"""이동편의 어댑터 단위 테스트 — Issue #76.
+"""이동편의 어댑터 단위 테스트 — Issue #76, #85.
 
 네트워크/DB 없이 매핑·병합·플래그 파싱 로직만 검증한다.
 """
@@ -13,6 +13,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from collectors.gbis import GbisCollector  # noqa: E402
+from collectors.mobility_base import to_float, to_yn  # noqa: E402
 from collectors.korail_conv import KorailConvCollector, ANYANG_STATIONS  # noqa: E402
 from collectors.kowsi_facl import parse_eval_flags, check_api_error, KowsiFaclCollector  # noqa: E402
 from collectors.tour_bf import TourBfCollector, flag_from_text  # noqa: E402
@@ -44,6 +45,124 @@ class GbisMappingTests(unittest.TestCase):
         row = GbisCollector.map_route({'routeId': '1', 'routeName': 'x'})
         self.assertIsNone(row['peek_alloc'])
         self.assertIsNone(row['start_station_id'])
+
+
+class GbisStationMappingTests(unittest.TestCase):
+    """경유정류소 목록조회 응답 매핑 — Issue #85. 실응답 형태 기준."""
+
+    SAMPLE = {
+        'centerYn': 'N', 'districtCd': 2, 'mobileNo': ' 09327', 'regionName': '안양',
+        'stationId': 208000363, 'stationName': '안양박물관.김중업건축박물관',
+        'x': 126.9188611, 'y': 37.4176389, 'adminName': '경기도 안양시',
+        'stationSeq': 2, 'turnSeq': 25, 'turnYn': 'N',
+    }
+
+    def test_map_station_columns(self):
+        row = GbisCollector.map_station(self.SAMPLE)
+        self.assertEqual(row['station_id'], 208000363)
+        self.assertEqual(row['station_name'], '안양박물관.김중업건축박물관')
+        self.assertEqual(row['admin_name'], '경기도 안양시')
+        self.assertEqual(row['center_yn'], 'N')
+        self.assertEqual(row['district_cd'], 2)
+        self.assertIn('base_dt', row)
+
+    def test_mobile_no_is_trimmed(self):
+        """응답의 mobileNo 는 선행 공백이 붙어 온다 — 저장 전 trim 되어야 한다."""
+        row = GbisCollector.map_station(self.SAMPLE)
+        self.assertEqual(row['mobile_no'], '09327')
+
+    def test_x_is_longitude_y_is_latitude(self):
+        """GBIS 는 x=경도, y=위도. 뒤바뀌면 안양 좌표가 국외로 나간다."""
+        row = GbisCollector.map_station(self.SAMPLE)
+        self.assertAlmostEqual(row['latitude'], 37.4176389)
+        self.assertAlmostEqual(row['longitude'], 126.9188611)
+        self.assertTrue(33.0 < row['latitude'] < 39.0)
+        self.assertTrue(124.0 < row['longitude'] < 132.0)
+
+    def test_map_station_missing_fields_are_none(self):
+        row = GbisCollector.map_station({'stationId': '1', 'stationName': 'x'})
+        self.assertIsNone(row['latitude'])
+        self.assertIsNone(row['longitude'])
+        self.assertIsNone(row['center_yn'])
+        self.assertIsNone(row['mobile_no'])
+
+    def test_map_route_station_columns(self):
+        row = GbisCollector.map_route_station(241253001, self.SAMPLE)
+        self.assertEqual(row['route_id'], 241253001)
+        self.assertEqual(row['station_id'], 208000363)
+        self.assertEqual(row['station_seq'], 2)
+        self.assertEqual(row['turn_seq'], 25)
+        self.assertEqual(row['turn_yn'], 'N')
+
+    def test_collect_stations_dedupes_and_builds_links(self):
+        """두 노선이 같은 정류장을 경유해도 정류장은 1건, 관계는 2건이어야 한다."""
+        other = dict(self.SAMPLE, stationId=208000364, stationSeq=3)
+        pages = {
+            '1': [self.SAMPLE, other],
+            '2': [self.SAMPLE],
+        }
+
+        class Stub(GbisCollector):
+            def __init__(self):
+                pass
+
+            @property
+            def api_key(self):
+                return 'k'
+
+            def _route_station_url(self, route_id):
+                return str(route_id)
+
+            def get_json(self, url):
+                return {'response': {'msgBody': {'busRouteStationList': pages[url]}}}
+
+            @staticmethod
+            def pause():
+                return None
+
+        stations, links = Stub().collect_stations(['1', '2'])
+        self.assertEqual(len(stations), 2)
+        self.assertEqual(len(links), 3)
+        self.assertEqual({s['station_id'] for s in stations}, {208000363, 208000364})
+        self.assertEqual(sorted(l['route_id'] for l in links), [1, 1, 2])
+
+    def test_collect_stations_skips_rows_without_seq(self):
+        """station_seq 는 노선-정류장 자연키 구성요소 — 없으면 관계에서 제외한다."""
+        no_seq = dict(self.SAMPLE)
+        no_seq.pop('stationSeq')
+
+        class Stub(GbisCollector):
+            def __init__(self):
+                pass
+
+            def _route_station_url(self, route_id):
+                return str(route_id)
+
+            def get_json(self, url):
+                return {'response': {'msgBody': {'busRouteStationList': no_seq}}}
+
+            @staticmethod
+            def pause():
+                return None
+
+        stations, links = Stub().collect_stations(['1'])
+        self.assertEqual(len(stations), 1)
+        self.assertEqual(links, [])
+
+
+class MobilityHelperTests(unittest.TestCase):
+    def test_to_float(self):
+        self.assertAlmostEqual(to_float('37.5'), 37.5)
+        self.assertIsNone(to_float(''))
+        self.assertIsNone(to_float(None))
+        self.assertIsNone(to_float('abc'))
+
+    def test_to_yn(self):
+        self.assertEqual(to_yn('Y'), 'Y')
+        self.assertEqual(to_yn('n'), 'N')
+        self.assertEqual(to_yn(True), 'Y')
+        self.assertIsNone(to_yn(None))
+        self.assertIsNone(to_yn('maybe'))
 
 
 class KorailMergeTests(unittest.TestCase):
