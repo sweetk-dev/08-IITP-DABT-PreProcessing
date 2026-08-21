@@ -1,7 +1,9 @@
 """이동편의 데이터 적재 모듈 — Issue #76.
 
-대상 테이블(01-IITP-DABT-Database v1.1.0, PR #28):
+대상 테이블(01-IITP-DABT-Database):
 - tran_bus_route_info          (GBIS)          ON CONFLICT (route_id)
+- tran_bus_station_info        (GBIS)          ON CONFLICT (station_id)
+- tran_bus_route_station       (GBIS)          ON CONFLICT (route_id, station_id, station_seq)
 - poi_station_access_status    (KORAIL_CONV)   ON CONFLICT (stn_cd)
 - poi_station_wheelchair_lift  (KRNA_LIFT CSV) ON CONFLICT (line_name, stn_name, mng_no)
 - poi_facility_accessibility   (KOWSI_FACL)    ON CONFLICT (facl_inf_id)
@@ -64,6 +66,43 @@ def upsert_bus_routes(rows: List[dict]) -> int:
         " we_peek_alloc=EXCLUDED.we_peek_alloc, we_npeek_alloc=EXCLUDED.we_npeek_alloc,"
         " up_first_time=EXCLUDED.up_first_time, up_last_time=EXCLUDED.up_last_time,"
         " down_first_time=EXCLUDED.down_first_time, down_last_time=EXCLUDED.down_last_time,"
+        " base_dt=EXCLUDED.base_dt, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+    )
+    return _execute_batch(sql, rows)
+
+
+def upsert_bus_stations(rows: List[dict]) -> int:
+    """tran_bus_station_info — GBIS 경유정류소 마스터 (Issue #85).
+
+    좌표는 GBIS 가 항상 채워 보내지만, 결측 응답이 기존 좌표를 지우지 않도록
+    COALESCE 로 보존한다(poi_station_access_status 와 동일한 방어).
+    """
+    sql = (
+        "INSERT INTO tran_bus_station_info ("
+        " station_id, mobile_no, station_name, region_name, admin_name,"
+        " latitude, longitude, center_yn, district_cd, base_dt, created_by)"
+        " VALUES (:station_id, :mobile_no, :station_name, :region_name, :admin_name,"
+        " :latitude, :longitude, :center_yn, :district_cd, CAST(:base_dt AS date), :created_by)"
+        " ON CONFLICT (station_id) DO UPDATE SET"
+        " mobile_no=EXCLUDED.mobile_no, station_name=EXCLUDED.station_name,"
+        " region_name=EXCLUDED.region_name, admin_name=EXCLUDED.admin_name,"
+        " latitude=COALESCE(EXCLUDED.latitude, tran_bus_station_info.latitude),"
+        " longitude=COALESCE(EXCLUDED.longitude, tran_bus_station_info.longitude),"
+        " center_yn=EXCLUDED.center_yn, district_cd=EXCLUDED.district_cd,"
+        " base_dt=EXCLUDED.base_dt, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+    )
+    return _execute_batch(sql, rows)
+
+
+def upsert_bus_route_stations(rows: List[dict]) -> int:
+    """tran_bus_route_station — 노선-정류장 경유 관계 (Issue #85)."""
+    sql = (
+        "INSERT INTO tran_bus_route_station ("
+        " route_id, station_id, station_seq, turn_seq, turn_yn, base_dt, created_by)"
+        " VALUES (:route_id, :station_id, :station_seq, :turn_seq, :turn_yn,"
+        " CAST(:base_dt AS date), :created_by)"
+        " ON CONFLICT (route_id, station_id, station_seq) DO UPDATE SET"
+        " turn_seq=EXCLUDED.turn_seq, turn_yn=EXCLUDED.turn_yn,"
         " base_dt=EXCLUDED.base_dt, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
     )
     return _execute_batch(sql, rows)

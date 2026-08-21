@@ -27,6 +27,28 @@ def to_int(value) -> Optional[int]:
         return None
 
 
+def to_float(value) -> Optional[float]:
+    """실수 변환 실패 시 None (좌표 등 외부 API 필드 방어)."""
+    try:
+        if value is None or value == '':
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def to_yn(value) -> Optional[str]:
+    """외부 API 의 여부 필드를 'Y'/'N' 한 글자로 정규화. 판별 불가 시 None."""
+    if value is None:
+        return None
+    token = str(value).strip().upper()
+    if token in ('Y', 'YES', 'TRUE', '1'):
+        return 'Y'
+    if token in ('N', 'NO', 'FALSE', '0'):
+        return 'N'
+    return None
+
+
 class MobilityCollector(BaseCollector):
     """이동편의 소스 공통 베이스. 서브클래스는 collect() 만 구현하면 된다."""
 
