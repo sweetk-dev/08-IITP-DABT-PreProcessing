@@ -6,6 +6,9 @@
 - tran_bus_route_station       (GBIS)          ON CONFLICT (route_id, station_id, station_seq)
 - poi_station_access_status    (KORAIL_CONV)   ON CONFLICT (stn_cd)
 - poi_station_wheelchair_lift  (KRNA_LIFT CSV) ON CONFLICT (line_name, stn_name, mng_no)
+- poi_station_elevator_unit    (KRNA_STN CSV)  선명 단위 전체 교체 (연 1회 파일)
+- poi_station_toilet_unit      (KRNA_STN CSV)  선명·disabled_yn 단위 전체 교체
+- poi_station_platform         (KRNA_STN CSV)  ON CONFLICT (line_name, stn_name, platform_no) + 이격거리 요약 UPDATE
 - poi_facility_accessibility   (KOWSI_FACL)    ON CONFLICT (facl_inf_id)
 - poi_tour_bf_facility         (TOUR_BF_API)   자연키 없음 → (fclt_name, sido_code) 조회 후 UPDATE/INSERT
 
@@ -171,6 +174,82 @@ def upsert_wheelchair_lifts(rows: List[dict]) -> int:
         " length_mm=EXCLUDED.length_mm, width_mm=EXCLUDED.width_mm,"
         " start_floor=EXCLUDED.start_floor, end_floor=EXCLUDED.end_floor,"
         " base_dt=EXCLUDED.base_dt, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+    )
+    return _execute_batch(sql, rows)
+
+
+def _replace_by_group(table: str, group_cols: tuple, insert_sql: str, rows: List[dict]) -> int:
+    """파일 단위 전체 교체 — 그룹(선명 등)에 해당하는 기존 행을 지우고 다시 넣는다.
+
+    연 1회 갱신되는 파일 자료는 행 자연키가 없어(같은 역에 '내부' 승강기가 여럿) UPSERT 로
+    낡은 행을 걷어낼 수 없다. 한 트랜잭션에서 그룹 삭제 → 삽입한다.
+    """
+    if not rows:
+        return 0
+    if engine is None:
+        raise RuntimeError('DB engine not configured (DB_URL)')
+    groups = sorted({tuple(r[c] for c in group_cols) for r in rows})
+    where = ' AND '.join('%s = :%s' % (c, c) for c in group_cols)
+    with engine.begin() as conn:
+        for g in groups:
+            conn.execute(text('DELETE FROM %s WHERE %s' % (table, where)),
+                         dict(zip(group_cols, g)))
+        for row in rows:
+            conn.execute(text(insert_sql), dict(row, created_by=CREATED_BY))
+    return len(rows)
+
+
+def replace_station_elevators(rows: List[dict]) -> int:
+    sql = (
+        "INSERT INTO poi_station_elevator_unit ("
+        " oper_org, line_name, stn_name, unit_seq, exit_no, detail_loc,"
+        " capacity_person, capacity_kg, base_dt, created_by)"
+        " VALUES (:oper_org, :line_name, :stn_name, :unit_seq, :exit_no, :detail_loc,"
+        " :capacity_person, :capacity_kg, CAST(:base_dt AS date), :created_by)"
+    )
+    return _replace_by_group('poi_station_elevator_unit', ('line_name',), sql, rows)
+
+
+def replace_station_toilets(rows: List[dict]) -> int:
+    sql = (
+        "INSERT INTO poi_station_toilet_unit ("
+        " oper_org, line_name, stn_name, disabled_yn, unit_seq, ground_dv, floor_no,"
+        " gate_inout, exit_no, detail_loc, toilet_kind, base_dt, created_by)"
+        " VALUES (:oper_org, :line_name, :stn_name, :disabled_yn, :unit_seq, :ground_dv, :floor_no,"
+        " :gate_inout, :exit_no, :detail_loc, :toilet_kind, CAST(:base_dt AS date), :created_by)"
+    )
+    return _replace_by_group('poi_station_toilet_unit', ('line_name', 'disabled_yn'), sql, rows)
+
+
+def upsert_station_platforms(rows: List[dict]) -> int:
+    sql = (
+        "INSERT INTO poi_station_platform ("
+        " oper_org, line_name, stn_name, platform_no, updown, ground_dv, floor_no,"
+        " platform_connect_yn, screen_door_yn, safety_plate_yn, base_dt, created_by)"
+        " VALUES (:oper_org, :line_name, :stn_name, :platform_no, :updown, :ground_dv, :floor_no,"
+        " :platform_connect_yn, :screen_door_yn, :safety_plate_yn, CAST(:base_dt AS date), :created_by)"
+        " ON CONFLICT (line_name, stn_name, platform_no) DO UPDATE SET"
+        " oper_org=EXCLUDED.oper_org, updown=EXCLUDED.updown, ground_dv=EXCLUDED.ground_dv,"
+        " floor_no=EXCLUDED.floor_no, platform_connect_yn=EXCLUDED.platform_connect_yn,"
+        " screen_door_yn=EXCLUDED.screen_door_yn, safety_plate_yn=EXCLUDED.safety_plate_yn,"
+        " base_dt=EXCLUDED.base_dt, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+    )
+    return _execute_batch(sql, rows)
+
+
+def update_platform_gaps(rows: List[dict]) -> int:
+    """이격거리 요약을 승강장 행에 붙인다. 승강장 행이 없으면(승강장 정보 파일 미적재) 요약만으로
+    행을 만든다 — 상하행·안전발판은 NULL 로 남고 다음 승강장 파일 적재 때 채워진다."""
+    sql = (
+        "INSERT INTO poi_station_platform ("
+        " oper_org, line_name, stn_name, platform_no, gap_min_cm, gap_max_cm, gap_avg_cm, door_cnt,"
+        " base_dt, created_by)"
+        " VALUES (:oper_org, :line_name, :stn_name, :platform_no, :gap_min_cm, :gap_max_cm, :gap_avg_cm,"
+        " :door_cnt, CAST(:base_dt AS date), :created_by)"
+        " ON CONFLICT (line_name, stn_name, platform_no) DO UPDATE SET"
+        " gap_min_cm=EXCLUDED.gap_min_cm, gap_max_cm=EXCLUDED.gap_max_cm,"
+        " gap_avg_cm=EXCLUDED.gap_avg_cm, door_cnt=EXCLUDED.door_cnt,"
+        " updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
     )
     return _execute_batch(sql, rows)
 
