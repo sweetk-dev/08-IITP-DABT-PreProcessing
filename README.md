@@ -1,11 +1,13 @@
 # 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
 
-![version](https://img.shields.io/badge/version-v1.9.0-blue)
+![version](https://img.shields.io/badge/version-v1.10.0-blue)
 
 ## 개요
 외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
+
+> v1.10.0 — 국가철도공단 **역사 설비 CSV**(엘리베이터·화장실·장애인화장실·승강장·승강장이격거리, 수도권 1/4호선)를 설비 단위로 적재하는 `scripts/load_krna_station_csv.py` 추가. 헤더로 파일 종류를 자동 판별하며 01 v1.3.0 테이블 `poi_station_elevator_unit` / `poi_station_toilet_unit` / `poi_station_platform` 에 넣는다. 연 1회 파일 갱신이므로 배치 대상이 아니다.
 
 > 이슈 #85 (v1.9.0) — GBIS 수집이 노선 메타에 이어 **경유정류소(정류장 좌표 + 노선-정류장 관계)** 까지 처리한다. 적재 테이블은 `tran_bus_route_info` / `tran_bus_station_info` / `tran_bus_route_station` 3종. 노선 메타만 갱신하려면 `GBIS_COLLECT_STATIONS=false`.
 
@@ -144,6 +146,24 @@ DB_BATCH_SIZE=200
 - **과거 데이터 관리**: 자동으로 이전 버전 데이터 정리
 - **에러 처리**: 필수 테이블 누락 시 프로그램 중단
 - **로그 관리**: 실행 로그는 `logs/` 폴더에 날짜별 저장
+
+## 역사 설비 CSV 적재 (국가철도공단, v1.10.0)
+
+공공데이터포털에서 받은 파일(cp949)을 그대로 넣는다. 파일명은 자유 — 종류는 헤더로 판별한다.
+화장실·장애인화장실은 헤더가 같으므로 파일명에 `장애인` 이 있거나 `--disabled` 를 주면 `disabled_yn='Y'` 로 적재한다.
+이격거리 파일은 출입문 단위 원자료를 승강장 단위(min/max/avg/출입문 수)로 요약해 `poi_station_platform` 에 붙인다.
+
+```bash
+python scripts/load_krna_station_csv.py --dir ext_data/krna_20260902 --base-dt 2025-06-30
+python scripts/load_krna_station_csv.py --csv 국가철도공단_수도권1호선_엘리베이터_20250630.csv --dry-run
+```
+
+| 파일(포털 ID) | 대상 테이블 | 적재 방식 |
+|---|---|---|
+| 수도권1/4호선_엘리베이터 (15041389 / 15041392) | `poi_station_elevator_unit` | 선명 단위 전체 교체 |
+| 수도권1/4호선_화장실 (15041254 / 15041257) · 장애인화장실 (15041222 / 15041225) | `poi_station_toilet_unit` | 선명·disabled_yn 단위 전체 교체 |
+| 수도권1/4호선_승강장_정보 (15041192 / 15041194) | `poi_station_platform` | UPSERT (line, stn, platform_no) |
+| 수도권1/4호선_승강장이격거리 (15041514 / 15041517) | `poi_station_platform` gap_* | 승강장 단위 요약 UPDATE |
 
 ## 스케줄러 실행 (정기 수집)
 
