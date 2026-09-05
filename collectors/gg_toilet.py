@@ -15,7 +15,7 @@
     TOILET_YN                       → cctv_yn (화장실 입구 CCTV)
     INSTL_YM / RE_BUILD_YM (YYYYMM) → install_dt / remodeled_dt (YYYY-MM)
   원천에 없는 컬럼: basis, open_time_detail, safety_target_yn → None.
-  원천에만 있는 항목: MALE_FEMALE_CMNUSE_TOILET_YN(남녀공용) — 담을 컬럼이 없어 버린다.
+  MALE_FEMALE_CMNUSE_TOILET_YN(남녀공용) → unisex_yn (01 v1.4.0 에서 추가).
 - OPEN_TM_INFO 는 '상시'/'정시' 두 값뿐이다. 개방시간 상세(예: 09:00~18:00)는 이 원천에
   없으므로 적재 시 이름+주소가 같은 기존 행의 open_time_detail 을 유지한다(db_mobility 참조).
 """
@@ -141,6 +141,7 @@ def map_row(src: dict) -> dict:
         'diaper_table_yn': to_yn(src.get('INSTL_YN')),
         'diaper_table_location': _clean(src.get('PLC_NM')),
         'remodeled_dt': yyyymm_to_dash(_clean(src.get('RE_BUILD_YM'))),
+        'unisex_yn': to_yn(src.get('MALE_FEMALE_CMNUSE_TOILET_YN')),   # 01 v1.4.0 컬럼
         'base_dt': yyyymmdd_to_date(_clean(src.get('DATA_STD_DE'))),
     }
 

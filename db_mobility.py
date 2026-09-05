@@ -260,17 +260,18 @@ def upsert_facilities(rows: List[dict]) -> int:
         "INSERT INTO poi_facility_accessibility ("
         " facl_inf_id, wfclt_id, facl_name, facl_type, addr, latitude, longitude, estb_date,"
         " elevator_yn, dis_toilet_yn, dis_parking_yn, entrance_ramp_yn, entrance_door_yn,"
-        " approach_road_yn, eval_info_raw, base_dt, created_by)"
+        " approach_road_yn, guide_facility_yn, accessible_room_yn, eval_info_raw, base_dt, created_by)"
         " VALUES (:facl_inf_id, :wfclt_id, :facl_name, :facl_type, :addr, :latitude, :longitude, :estb_date,"
         " :elevator_yn, :dis_toilet_yn, :dis_parking_yn, :entrance_ramp_yn, :entrance_door_yn,"
-        " :approach_road_yn, :eval_info_raw, CAST(:base_dt AS date), :created_by)"
+        " :approach_road_yn, :guide_facility_yn, :accessible_room_yn, :eval_info_raw, CAST(:base_dt AS date), :created_by)"
         " ON CONFLICT (facl_inf_id) DO UPDATE SET"
         " wfclt_id=EXCLUDED.wfclt_id, facl_name=EXCLUDED.facl_name, facl_type=EXCLUDED.facl_type,"
         " addr=EXCLUDED.addr, latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude,"
         " estb_date=EXCLUDED.estb_date, elevator_yn=EXCLUDED.elevator_yn,"
         " dis_toilet_yn=EXCLUDED.dis_toilet_yn, dis_parking_yn=EXCLUDED.dis_parking_yn,"
         " entrance_ramp_yn=EXCLUDED.entrance_ramp_yn, entrance_door_yn=EXCLUDED.entrance_door_yn,"
-        " approach_road_yn=EXCLUDED.approach_road_yn, eval_info_raw=EXCLUDED.eval_info_raw,"
+        " approach_road_yn=EXCLUDED.approach_road_yn, guide_facility_yn=EXCLUDED.guide_facility_yn,"
+        " accessible_room_yn=EXCLUDED.accessible_room_yn, eval_info_raw=EXCLUDED.eval_info_raw,"
         " base_dt=EXCLUDED.base_dt, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
     )
     return _execute_batch(sql, rows)
@@ -347,7 +348,7 @@ PUBLIC_TOILET_COLUMNS = (
     'f_child_toilet_count', 'managing_org', 'phone_number', 'open_time',
     'install_dt', 'latitude', 'longitude', 'owner_type', 'waste_process_type', 'safety_target_yn',
     'emg_bell_yn', 'emg_bell_location', 'cctv_yn', 'diaper_table_yn', 'diaper_table_location',
-    'remodeled_dt',
+    'remodeled_dt', 'unisex_yn',
 )
 
 

@@ -29,7 +29,7 @@ def _row(name, road=None, jibun=None, **kw):
         'phone_number': None, 'open_time': '상시', 'open_time_detail': None, 'install_dt': None,
         'latitude': 37.39, 'longitude': 126.95, 'owner_type': None, 'waste_process_type': '수세식',
         'safety_target_yn': None, 'emg_bell_yn': 'Y', 'emg_bell_location': None, 'cctv_yn': 'N',
-        'diaper_table_yn': None, 'diaper_table_location': None, 'remodeled_dt': None,
+        'diaper_table_yn': None, 'diaper_table_location': None, 'remodeled_dt': None, 'unisex_yn': 'N',
         'base_dt': '2025-07-17',
     }
     base.update(kw)

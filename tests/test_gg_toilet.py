@@ -85,6 +85,7 @@ class MapRowTests(unittest.TestCase):
         self.assertEqual(row['cctv_yn'], 'N')
         self.assertIsNone(row['safety_target_yn'])
         self.assertIsNone(row['basis'])
+        self.assertEqual(row['unisex_yn'], 'N')
 
     def test_yyyymm_normalization(self):
         self.assertEqual(yyyymm_to_dash('202503'), '2025-03')
