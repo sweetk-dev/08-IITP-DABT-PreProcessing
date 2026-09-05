@@ -16,6 +16,7 @@ import os
 import db_mobility
 from db import get_api_info
 from collectors.gbis import GbisCollector
+from collectors.gg_toilet import GgToiletCollector
 from collectors.korail_conv import KorailConvCollector
 from collectors.kowsi_facl import KowsiFaclCollector
 from collectors.tour_bf import TourBfCollector
@@ -26,6 +27,7 @@ GENERIC_EXT_DATA_ROOT = 'ext_data'
 
 MOBILITY_COLLECTORS = {
     'GBIS': GbisCollector,
+    'GG_TOILET': GgToiletCollector,
     'KORAIL_CONV': KorailConvCollector,
     'KOWSI_FACL': KowsiFaclCollector,
     'TOUR_BF_API': TourBfCollector,
@@ -35,6 +37,7 @@ MOBILITY_EXT_SYS = tuple(MOBILITY_COLLECTORS)
 
 _UPSERT_DISPATCH = {
     'GBIS': db_mobility.upsert_bus_routes,
+    'GG_TOILET': db_mobility.upsert_public_toilets,
     'KORAIL_CONV': db_mobility.upsert_station_access,
     'KOWSI_FACL': db_mobility.upsert_facilities,
     'TOUR_BF_API': db_mobility.upsert_tour_bf,

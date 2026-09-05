@@ -11,6 +11,7 @@
 - poi_station_platform         (KRNA_STN CSV)  ON CONFLICT (line_name, stn_name, platform_no) + 이격거리 요약 UPDATE
 - poi_facility_accessibility   (KOWSI_FACL)    ON CONFLICT (facl_inf_id)
 - poi_tour_bf_facility         (TOUR_BF_API)   자연키 없음 → (fclt_name, sido_code) 조회 후 UPDATE/INSERT
+- poi_public_toilet_info       (GG_TOILET)     자연키 없음 → (이름+주소) 매칭 UPDATE / 미매칭 INSERT / 사라진 행 논리삭제
 
 created_by 는 DB 공통코드(sys_work_type) 시드 정본 'SYS-BACH' 를 따른다.
 """
@@ -331,3 +332,176 @@ def touch_latest_sync(ext_sys: str) -> None:
             " updated_at=CURRENT_TIMESTAMP, updated_by=:by"
             " WHERE ext_sys=:ext_sys AND del_yn='N'"
         ), {'ext_sys': ext_sys, 'by': CREATED_BY})
+
+
+# poi_public_toilet_info 적재 대상 테이블 — 통합 테스트가 임시 테이블로 바꿔 끼운다.
+PUBLIC_TOILET_TABLE = 'poi_public_toilet_info'
+
+# 수집 건수가 기존 활성 행의 이 비율 미만이면 원천 장애로 보고 적재를 중단한다.
+PUBLIC_TOILET_MIN_RATIO = 0.7
+
+PUBLIC_TOILET_COLUMNS = (
+    'toilet_type', 'basis', 'addr_road', 'addr_jibun',
+    'm_toilet_count', 'm_urinal_count', 'm_dis_toilet_count', 'm_dis_urinal_count',
+    'm_child_toilet_count', 'm_child_urinal_count', 'f_toilet_count', 'f_dis_toilet_count',
+    'f_child_toilet_count', 'managing_org', 'phone_number', 'open_time',
+    'install_dt', 'latitude', 'longitude', 'owner_type', 'waste_process_type', 'safety_target_yn',
+    'emg_bell_yn', 'emg_bell_location', 'cctv_yn', 'diaper_table_yn', 'diaper_table_location',
+    'remodeled_dt',
+)
+
+
+def _norm_addr(value) -> str:
+    """주소 매칭 키 — 공백·괄호 병기 제거. '동안로 66 (호계동, 도서관)' 과 '동안로 66' 을 같게 본다."""
+    import re
+    text = re.sub(r'\([^)]*\)', '', str(value or ''))
+    return re.sub(r'\s+', '', text)
+
+
+def public_toilet_match_keys(name: str, addr_road, addr_jibun, region_prefix: str = '') -> list:
+    """한 행이 가질 수 있는 매칭 키 목록 — (이름, 정규화 도로명) 과 (이름, 정규화 지번).
+
+    이 테이블엔 원천 고유키가 없다. 이름만으로는 동명 시설(어린이공원 화장실 등)이 섞이므로
+    주소를 반드시 같이 본다. 도로명·지번 중 하나만 같아도 같은 시설로 본다(과거 행은 둘 중
+    하나가 비어 있는 경우가 많다 — 2026-09-05 실측: 안양 174행 중 도로명 결측 27).
+    region_prefix(예: '경기도 안양시')가 주소 앞에 있으면 떼고 비교한다 — 과거 행에
+    '만안구 안양로 317' 처럼 시 이름 없이 적재된 것이 있다(안양 7건 실측).
+    """
+    name = (name or '').strip()
+    prefix = _norm_addr(region_prefix)
+    keys = []
+    for addr in (addr_road, addr_jibun):
+        key = _norm_addr(addr)
+        if prefix and key.startswith(prefix):
+            key = key[len(prefix):]
+        if name and key:
+            keys.append((name, key))
+    return keys
+
+
+def sync_public_toilets(rows: List[dict], addr_filter: str = None) -> dict:
+    """poi_public_toilet_info — 지역 단위 동기화 (GG_TOILET, 2026-09-05).
+
+    원천 고유키가 없어 (이름 + 도로명 또는 지번 주소) 로 기존 행을 찾는다.
+      · 매칭   → 제자리 UPDATE (toilet_id 보존, 소비자 참조 안정)
+      · 미매칭 신규 → INSERT
+      · 미매칭 기존 활성 행 → 논리삭제 (del_yn='Y') — 원천에서 사라진 시설
+    전량 논리삭제 후 재적재 방식은 실행마다 PK 가 바뀌고 삭제 행이 누적되므로 채택하지 않았다.
+
+    - 지역 판정: sido_code 일치 + (도로명·지번이 addr_filter 로 시작 OR 새 행에서 뽑은 '○○구'
+      접두어로 시작 — '만안구 안양로 317' 처럼 시 이름 없이 적재된 과거 행 대응).
+      LIKE '%안양%' 은 안양면·안양천로가 섞이므로 쓰지 않는다.
+    - 개방시간 상세(open_time_detail)는 이 원천에 없다. UPDATE 시 새 값이 없으면 기존 값을
+      유지한다(이름+주소가 같은 행에서만 — 이름만 같은 행으로의 복제는 하지 않는다).
+    - 방어: 수집 0건이면 무동작. 수집 건수가 기존 활성 행의 PUBLIC_TOILET_MIN_RATIO 미만이면
+      원천 장애로 보고 RuntimeError (부분 응답으로 정상 행을 지우는 사고 방지).
+    - 전체가 한 트랜잭션. 반환: {'matched','inserted','deleted','kept_detail'}.
+    """
+    import os
+    import re
+    from sqlalchemy import bindparam
+
+    result = {'matched': 0, 'inserted': 0, 'deleted': 0, 'kept_detail': 0}
+    if not rows:
+        logger.warning('%s: 수집 0건 — 기존 행을 유지하고 적재를 건너뜀', PUBLIC_TOILET_TABLE)
+        return result
+    if engine is None:
+        raise RuntimeError('DB engine not configured (DB_URL)')
+    if addr_filter is None:
+        addr_filter = os.getenv('GG_TOILET_ADDR_FILTER', '경기도 안양시').strip()
+    sido_code = rows[0]['sido_code']
+    table = PUBLIC_TOILET_TABLE
+
+    gu_names = set()
+    for row in rows:
+        for addr in (row.get('addr_road'), row.get('addr_jibun')):
+            if not addr or (addr_filter and not addr.startswith(addr_filter)):
+                continue
+            tokens = addr.split()
+            if len(tokens) >= 3 and tokens[2].endswith('구'):
+                gu_names.add(tokens[2])
+    gu_regex = '^(' + '|'.join(re.escape(g) for g in sorted(gu_names)) + r')(\s|$)' if gu_names else '^$'
+
+    select_sql = text(
+        "SELECT toilet_id, toilet_name, addr_road, addr_jibun, open_time_detail FROM " + table +
+        " WHERE del_yn='N' AND sido_code=:sido_code"
+        "   AND (addr_road LIKE :prefix OR addr_jibun LIKE :prefix"
+        "        OR addr_road ~ :gu_regex OR addr_jibun ~ :gu_regex)"
+    )
+    set_clause = ', '.join('%s=:%s' % (c, c) for c in PUBLIC_TOILET_COLUMNS)
+    update_sql = text(
+        "UPDATE " + table + " SET " + set_clause +
+        ", toilet_name=:toilet_name, sido_code=:sido_code,"
+        " open_time_detail=COALESCE(:open_time_detail, open_time_detail),"
+        " base_dt=CAST(:base_dt AS date), updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+        " WHERE toilet_id=:toilet_id"
+    )
+    delete_sql = text(
+        "UPDATE " + table + " SET del_yn='Y', deleted_at=CURRENT_TIMESTAMP,"
+        " deleted_by=:created_by, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+        " WHERE toilet_id IN :ids"
+    ).bindparams(bindparam('ids', expanding=True))
+    cols = ('sido_code', 'toilet_name') + PUBLIC_TOILET_COLUMNS + ('open_time_detail',)
+    insert_sql = text(
+        "INSERT INTO " + table + " (" + ', '.join(cols) + ", base_dt, created_by)"
+        " VALUES (" + ', '.join(':' + c for c in cols) + ", CAST(:base_dt AS date), :created_by)"
+    )
+
+    with engine.begin() as conn:
+        legacy = conn.execute(select_sql, {
+            'sido_code': sido_code, 'prefix': addr_filter + '%', 'gu_regex': gu_regex,
+        }).fetchall()
+        if legacy and len(rows) < len(legacy) * PUBLIC_TOILET_MIN_RATIO:
+            raise RuntimeError(
+                '%s: 수집 %d건이 기존 활성 %d건의 %.0f%% 미만 — 원천 장애로 보고 적재 중단'
+                % (table, len(rows), len(legacy), PUBLIC_TOILET_MIN_RATIO * 100))
+
+        by_key: dict = {}
+        ambiguous = set()
+        for _id, name, road, jibun, detail in legacy:
+            for key in public_toilet_match_keys(name, road, jibun, addr_filter):
+                if key in by_key and by_key[key][0] != _id:
+                    ambiguous.add(key)
+                by_key.setdefault(key, (_id, detail))
+        for key in ambiguous:
+            logger.warning('%s: 이름+주소가 같은 기존 행이 둘 이상 — 매칭 제외: %r', table, key)
+            by_key.pop(key, None)
+
+        matched_ids = set()
+        updates, inserts = [], []
+        for row in rows:
+            hit = None
+            for key in public_toilet_match_keys(row['toilet_name'], row.get('addr_road'), row.get('addr_jibun'), addr_filter):
+                if key in by_key and by_key[key][0] not in matched_ids:
+                    hit = by_key[key]
+                    break
+            params = dict(row, created_by=CREATED_BY)
+            if hit:
+                matched_ids.add(hit[0])
+                params['toilet_id'] = hit[0]
+                if not row.get('open_time_detail') and (hit[1] or '').strip():
+                    result['kept_detail'] += 1
+                updates.append(params)
+            else:
+                inserts.append(params)
+
+        stale_ids = [r[0] for r in legacy if r[0] not in matched_ids]
+        if updates:
+            conn.execute(update_sql, updates)
+        if inserts:
+            conn.execute(insert_sql, inserts)
+        if stale_ids:
+            conn.execute(delete_sql, {'ids': stale_ids, 'created_by': CREATED_BY})
+
+    result.update(matched=len(updates), inserted=len(inserts), deleted=len(stale_ids))
+    logger.info('%s(%s, sido=%s, 구=%s): 기존 활성 %d행 → 갱신 %d · 신규 %d · 논리삭제 %d '
+                '(개방시간 상세 유지 %d)', table, addr_filter or '전체', sido_code,
+                sorted(gu_names) or '-', len(legacy), len(updates), len(inserts), len(stale_ids),
+                result['kept_detail'])
+    return result
+
+
+def upsert_public_toilets(rows: List[dict]) -> int:
+    """mobility_pipeline 디스패치용 — 적재 행 수(갱신+신규)를 돌려준다."""
+    summary = sync_public_toilets(rows)
+    return summary['matched'] + summary['inserted']
