@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,7 +16,8 @@ if ROOT not in sys.path:
 from collectors.gbis import GbisCollector  # noqa: E402
 from collectors.mobility_base import to_float, to_yn  # noqa: E402
 from collectors.korail_conv import KorailConvCollector, ANYANG_STATIONS  # noqa: E402
-from collectors.kowsi_facl import parse_eval_flags, check_api_error, KowsiFaclCollector  # noqa: E402
+from collectors.kowsi_facl import (parse_eval_flags, is_dummy_eval, check_api_error,  # noqa: E402
+                                   KowsiFaclCollector)
 from collectors.tour_bf import TourBfCollector, flag_from_text  # noqa: E402
 
 
@@ -208,6 +210,91 @@ class KowsiEvalFlagTests(unittest.TestCase):
     def test_empty_eval_info_all_none(self):
         flags = parse_eval_flags(None)
         self.assertTrue(all(v is None for v in flags.values()))
+
+    # --- 2026-09-04 실측 반영 (안양 1,617개 시설 전수) ---
+
+    DUMMY = ('주출입구 접근로, 장애인전용주차구역, 주출입구높이차이제거(경사로), 주출입문, '
+             '승강기, 장애인사용가능화장실, 안내설비, 장애인사용가능객실')
+
+    def test_normalizes_spacing(self):
+        """원천이 공백을 다르게 내보내도 같은 항목으로 본다."""
+        a = parse_eval_flags('주출입구 높이차이 제거, 주출입구 접근로')
+        b = parse_eval_flags('주출입구높이차이제거,주출입구접근로')
+        self.assertEqual(a['entrance_ramp_yn'], 'Y')
+        self.assertEqual(a, b)
+
+    def test_dummy_eval_is_detected(self):
+        self.assertTrue(is_dummy_eval(self.DUMMY))
+        self.assertFalse(is_dummy_eval('승강기, 주출입구(문)'))
+        self.assertFalse(is_dummy_eval(None))
+
+    def test_dummy_eval_leaves_flags_unknown(self):
+        """더미는 'N'(부재)이 아니라 None(미확인)이어야 한다.
+
+        'N' 으로 두면 어린이공원 화장실에 승강기가 없다고 단정하는 게 아니라,
+        매핑을 늘리는 순간 '있다'로 뒤집혀 위양성이 된다. 판정 자체를 하지 않는다.
+        """
+        flags = parse_eval_flags(self.DUMMY, facl_id='4117110100-1-00000001')
+        self.assertTrue(all(v is None for v in flags.values()))
+
+    def test_unmapped_token_is_logged(self):
+        with self.assertLogs('collectors.kowsi_facl', level='WARNING') as cm:
+            flags = parse_eval_flags('승강기, 처음보는설비')
+        self.assertEqual(flags['elevator_yn'], 'Y')
+        self.assertTrue(any('미매핑' in m for m in cm.output))
+
+    def test_guide_and_room_tokens_map_to_columns(self):
+        """유도 및 안내 설비·장애인사용가능객실 — 2026-09-05 컬럼 추가."""
+        import logging
+        logger = logging.getLogger('collectors.kowsi_facl')
+        with self.assertLogs(logger, level='WARNING') as cm:
+            logger.warning('sentinel')       # assertLogs 는 로그가 없으면 실패한다
+            flags = parse_eval_flags('승강기, 유도 및 안내 설비, 장애인사용가능객실')
+        self.assertEqual([m for m in cm.output if 'sentinel' not in m], [])
+        self.assertEqual(flags['guide_facility_yn'], 'Y')
+        self.assertEqual(flags['accessible_room_yn'], 'Y')
+
+    def test_absent_room_token_is_unknown_not_n(self):
+        """객실 항목은 숙박시설에만 해당 — 없다고 'N' 을 주면 청사를 미설치 시설로 왜곡한다."""
+        flags = parse_eval_flags('승강기, 주출입구 접근로')
+        self.assertIsNone(flags['accessible_room_yn'])
+        self.assertEqual(flags['guide_facility_yn'], 'N')
+
+
+class KowsiEvalCacheTests(unittest.TestCase):
+    """기구표는 wfcltId(건물) 단위 — 같은 건물의 여러 시설은 1회만 호출한다."""
+
+    def test_same_building_fetched_once(self):
+        os.environ['KOWSI_FETCH_EVAL'] = 'ON'
+        os.environ['KOWSI_STATE_PATH'] = os.path.join(tempfile.mkdtemp(), 'state.json')
+        os.environ['KOWSI_PAGE_SIZE'] = '10'
+        os.environ['DATA_GO_KR_API_KEY'] = 'test-key'
+        c = KowsiFaclCollector(api_info={}, stats_src={})
+        import xml.etree.ElementTree as ET
+        calls = []
+
+        page = (
+            '<response><totalCount>3</totalCount>'
+            '<servList><faclInfId>1</faclInfId><faclNm>가</faclNm><wfcltId>B-1</wfcltId>'
+            '<lcMnad>경기도 안양시 A로 1</lcMnad></servList>'
+            '<servList><faclInfId>2</faclInfId><faclNm>나</faclNm><wfcltId>B-1</wfcltId>'
+            '<lcMnad>경기도 안양시 A로 1</lcMnad></servList>'
+            '<servList><faclInfId>3</faclInfId><faclNm>다</faclNm><wfcltId>B-2</wfcltId>'
+            '<lcMnad>경기도 안양시 A로 2</lcMnad></servList></response>')
+
+        def fake_get_xml(url):
+            if 'JpEvalInfoList' in url:
+                calls.append(url)
+                return ET.fromstring('<r><servList><evalInfo>승강기</evalInfo></servList></r>')
+            return ET.fromstring(page)
+
+        c.get_xml = fake_get_xml
+        c.pause = lambda *a, **k: None
+        rows = c.collect()
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(len(calls), 2, '건물 2개인데 %d회 호출됨' % len(calls))
+        self.assertTrue(all(r['elevator_yn'] == 'Y' for r in rows))
 
 
 class KowsiChunkedScanTests(unittest.TestCase):

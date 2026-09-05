@@ -37,8 +37,7 @@
 | `PROC_CONT` / `TOILET_POSESN_DIV` | `waste_process_type` / `owner_type` | 168/168 |
 
 원천에 **없는** 컬럼: `basis`, `open_time_detail`, `safety_target_yn` → NULL.
-원천에**만** 있는 항목: `MALE_FEMALE_CMNUSE_TOILET_YN`(남녀공용) — 이성 활동지원사와 동행하는 이용자에게 필요한 정보라
-`unisex_yn` 컬럼 추가를 별도 스키마 변경으로 진행한다(v1.12.0 예정).
+`MALE_FEMALE_CMNUSE_TOILET_YN`(남녀공용) → `unisex_yn` — 이성 활동지원사와 동행하는 이용자에게 필요한 정보라 01 v1.4.0 에서 컬럼을 추가해 v1.12.0 부터 적재한다(안양 243건 중 `Y` 4건).
 
 ---
 

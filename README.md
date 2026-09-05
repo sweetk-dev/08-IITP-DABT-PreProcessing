@@ -1,12 +1,14 @@
 # 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
 
-![version](https://img.shields.io/badge/version-v1.11.0-blue)
+![version](https://img.shields.io/badge/version-v1.12.0-blue)
 
 ## 개요
 외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
 
+> v1.12.0 — 01 v1.4.0 컬럼 반영. 기구표 항목 「유도 및 안내 설비」→`guide_facility_yn`, 「장애인사용가능객실」→`accessible_room_yn`(숙박시설 외에는 판정하지 않아 NULL), 화장실 남녀공용 →`unisex_yn`. 기존 행은 `scripts/backfill_facility_eval_flags.py` 로 저장된 기구표 원문을 다시 파싱해 채운다(재수집 불필요).
+>
 > v1.11.0 — 경기데이터드림 **공중화장실 현황(제공표준)** 수집기 `GG_TOILET` 추가. 행안부 표준데이터가 좌표 제공을 중단(2025-02)해 17%였던 안양 좌표 보유율을 98%로 올린다. 원천 고유키가 없어 (이름+주소) 매칭으로 제자리 갱신·신규·논리삭제를 한 트랜잭션에서 처리한다.
 >
 > v1.10.0 — 국가철도공단 **역사 설비 CSV**(엘리베이터·화장실·장애인화장실·승강장·승강장이격거리, 수도권 1/4호선)를 설비 단위로 적재하는 `scripts/load_krna_station_csv.py` 추가. 헤더로 파일 종류를 자동 판별하며 01 v1.3.0 테이블 `poi_station_elevator_unit` / `poi_station_toilet_unit` / `poi_station_platform` 에 넣는다. 연 1회 파일 갱신이므로 배치 대상이 아니다.
@@ -162,6 +164,18 @@ python main.py --mode db   --ext-sys GG_TOILET   # (이름+주소) 매칭 동기
 - 이 테이블엔 원천 고유키가 없어 **(이름+주소) 로 기존 행을 찾아 제자리 갱신(id 보존)·미매칭 신규 INSERT·원천에서 사라진 행 논리삭제**를 한 트랜잭션에서 처리한다. 대상 지역은 `GG_TOILET_ADDR_FILTER`(기본 `경기도 안양시`) 로 정한다. 수집 0건이면 무동작, 기존 활성 행의 70% 미만이면 중단
 - 원천에 없는 개방시간 상세(`open_time_detail`)는 매칭된 기존 행의 값을 유지한다
 - 필드 대응 근거·한계는 `docs/poi_public_toilet_info_안양_갱신_GG_TOILET_2026-09-05.md`
+
+## 건물 편의시설 플래그 백필 (`KOWSI_FACL`, v1.12.0)
+
+01 v1.4.0 에서 `poi_facility_accessibility` 에 `guide_facility_yn`·`accessible_room_yn` 이 추가됐다. 이미 저장된 기구표 원문(`eval_info_raw`)을 수집기와 같은 파서로 다시 읽어 두 컬럼만 채운다.
+
+```bash
+python scripts/backfill_facility_eval_flags.py --dry-run   # 건수만
+python scripts/backfill_facility_eval_flags.py             # 500건 단위 커밋, 재실행 안전
+```
+
+- `accessible_room_yn` 은 항목이 있을 때만 `Y`, 없으면 `N` 이 아니라 NULL — 숙박시설이 아닌 청사·어린이집을 "객실 미설치"로 기록하지 않기 위해서다. 안양 실측: `Y` 3건(기숙사 2·일반숙박시설 1)
+- 기구표 미작성(더미 응답)은 두 컬럼 모두 NULL 로 남는다
 
 ## 역사 설비 CSV 적재 (국가철도공단, v1.10.0)
 
