@@ -10,6 +10,7 @@ from config import load_target_src_tbl_id_list, get_log_level, get_data_collecti
 from db_processing import process_db_insertion
 from collectors import KosisCollector
 from collectors.gbis import GbisCollector
+from collectors.gg_toilet import GgToiletCollector
 from collectors.korail_conv import KorailConvCollector
 from collectors.kowsi_facl import KowsiFaclCollector
 from collectors.tour_bf import TourBfCollector
@@ -26,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # preserved: with ext_sys defaulting to 'KOSIS', the legacy save path and the
 # collector behavior are identical to v1.4.0.
 # ============================================================================
-__version__ = "1.7.1"
+__version__ = "1.11.0"
 
 
 
@@ -51,6 +52,7 @@ _COLLECTOR_REGISTRY = {
     'KOSIS': KosisCollector,
     # 이슈 #76: 이동편의 소스 4종 — 실행 흐름은 mobility_pipeline.run_mobility() 로 위임
     'GBIS': GbisCollector,
+    'GG_TOILET': GgToiletCollector,
     'KORAIL_CONV': KorailConvCollector,
     'KOWSI_FACL': KowsiFaclCollector,
     'TOUR_BF_API': TourBfCollector,
