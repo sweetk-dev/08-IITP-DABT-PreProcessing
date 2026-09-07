@@ -6,6 +6,8 @@ main.py 가 ext_sys 가 MOBILITY_EXT_SYS 에 속하면 이 모듈로 위임한�
 
 GBIS 는 노선 메타에 이어 경유정류소(정류장 마스터 + 노선-정류장 관계)까지
 같은 실행에서 수집한다 (Issue #85). GBIS_COLLECT_STATIONS=false 로 끌 수 있다.
+GBIS_LOWFLOOR 는 저상버스 노선현황 페이지(전일 기준)를 읽어 tran_bus_route_info.low_bus_yn 만
+갱신한다 (Issue #97) — 매일 1회 실행 대상.
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import os
 import db_mobility
 from db import get_api_info
 from collectors.gbis import GbisCollector
+from collectors.gbis_lowfloor import GbisLowFloorCollector
 from collectors.gg_toilet import GgToiletCollector
 from collectors.korail_conv import KorailConvCollector
 from collectors.kowsi_facl import KowsiFaclCollector
@@ -27,6 +30,7 @@ GENERIC_EXT_DATA_ROOT = 'ext_data'
 
 MOBILITY_COLLECTORS = {
     'GBIS': GbisCollector,
+    'GBIS_LOWFLOOR': GbisLowFloorCollector,
     'GG_TOILET': GgToiletCollector,
     'KORAIL_CONV': KorailConvCollector,
     'KOWSI_FACL': KowsiFaclCollector,
@@ -37,6 +41,7 @@ MOBILITY_EXT_SYS = tuple(MOBILITY_COLLECTORS)
 
 _UPSERT_DISPATCH = {
     'GBIS': db_mobility.upsert_bus_routes,
+    'GBIS_LOWFLOOR': db_mobility.update_bus_route_low_floor,
     'GG_TOILET': db_mobility.upsert_public_toilets,
     'KORAIL_CONV': db_mobility.upsert_station_access,
     'KOWSI_FACL': db_mobility.upsert_facilities,
