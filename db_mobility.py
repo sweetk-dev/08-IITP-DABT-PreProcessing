@@ -13,6 +13,7 @@
 - poi_facility_accessibility   (KOWSI_FACL)    ON CONFLICT (facl_inf_id)
 - poi_tour_bf_facility         (TOUR_BF_API)   자연키 없음 → (fclt_name, sido_code) 조회 후 UPDATE/INSERT
 - poi_public_toilet_info       (GG_TOILET)     자연키 없음 → (이름+주소) 매칭 UPDATE / 미매칭 INSERT / 사라진 행 논리삭제
+- poi_emergency_support        (GG_ASSIST_REPAIR) ON CONFLICT (support_type, name, coalesce(addr_road,''))
 
 created_by 는 DB 공통코드(sys_work_type) 시드 정본 'SYS-BACH' 를 따른다.
 """
@@ -324,11 +325,12 @@ def upsert_tour_bf(rows: List[dict]) -> int:
         " sido_code, fclt_name, toilet_yn, elevator_yn, parking_yn, slope_yn,"
         " subway_yn, bus_stop_yn, wheelchair_rent_yn, tactile_map_yn, audio_guide_yn,"
         " nursing_room_yn, accessible_room_yn, stroller_rent_yn,"
-        " addr_road, addr_jibun, latitude, longitude, base_dt, created_by)"
+        " addr_road, addr_jibun, latitude, longitude, detail_raw, base_dt, created_by)"
         " VALUES (:sido_code, :fclt_name, :toilet_yn, :elevator_yn, :parking_yn, :slope_yn,"
         " :subway_yn, :bus_stop_yn, :wheelchair_rent_yn, :tactile_map_yn, :audio_guide_yn,"
         " :nursing_room_yn, :accessible_room_yn, :stroller_rent_yn,"
-        " :addr_road, :addr_jibun, :latitude, :longitude, CAST(:base_dt AS date), :created_by)"
+        " :addr_road, :addr_jibun, :latitude, :longitude, CAST(:detail_raw AS jsonb),"
+        " CAST(:base_dt AS date), :created_by)"
     )
     update_sql = text(
         "UPDATE poi_tour_bf_facility SET"
@@ -338,6 +340,7 @@ def upsert_tour_bf(rows: List[dict]) -> int:
         " audio_guide_yn=:audio_guide_yn, nursing_room_yn=:nursing_room_yn,"
         " accessible_room_yn=:accessible_room_yn, stroller_rent_yn=:stroller_rent_yn,"
         " addr_road=:addr_road, addr_jibun=:addr_jibun, latitude=:latitude, longitude=:longitude,"
+        " detail_raw=CAST(:detail_raw AS jsonb),"
         " base_dt=CAST(:base_dt AS date), updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
         " WHERE fclt_id=:fclt_id"
     )
@@ -353,6 +356,32 @@ def upsert_tour_bf(rows: List[dict]) -> int:
                 conn.execute(insert_sql, params)
             count += 1
     return count
+
+
+def upsert_emergency_support(rows: List[dict]) -> int:
+    """poi_emergency_support — (유형, 이름, 도로명주소) 복합 자연키.
+
+    같은 이름의 지회가 시군마다 있어 이름만으로는 구분되지 않는다(예: 경기도지체
+    장애인협회 OO시지회). 주소를 키에 넣어야 시군 간 충돌이 없다.
+    """
+    sql = (
+        "INSERT INTO poi_emergency_support ("
+        " support_type, sido_code, sgg_name, name, addr_road, addr_jibun, zip_code,"
+        " latitude, longitude, tel, homepage, open_hours, note, source, confidence,"
+        " base_dt, created_by)"
+        " VALUES (:support_type, :sido_code, :sgg_name, :name, :addr_road, :addr_jibun, :zip_code,"
+        " :latitude, :longitude, :tel, :homepage, :open_hours, :note, :source, :confidence,"
+        " CAST(:base_dt AS date), :created_by)"
+        " ON CONFLICT (support_type, name, coalesce(addr_road, '')) DO UPDATE SET"
+        " sido_code=EXCLUDED.sido_code, sgg_name=EXCLUDED.sgg_name,"
+        " addr_jibun=EXCLUDED.addr_jibun, zip_code=EXCLUDED.zip_code,"
+        " latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude,"
+        " tel=EXCLUDED.tel, homepage=EXCLUDED.homepage, open_hours=EXCLUDED.open_hours,"
+        " note=EXCLUDED.note, source=EXCLUDED.source, confidence=EXCLUDED.confidence,"
+        " base_dt=EXCLUDED.base_dt, del_yn='N', deleted_at=NULL, deleted_by=NULL,"
+        " updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+    )
+    return _execute_batch(sql, rows)
 
 
 def touch_latest_sync(ext_sys: str) -> None:

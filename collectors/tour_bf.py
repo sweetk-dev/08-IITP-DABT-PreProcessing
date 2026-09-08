@@ -5,6 +5,8 @@ Issue #76. areaBasedList2(지역 목록) + detailWithTour2(무장애 편의정�
 기본 대상: 경기(31) 안양시(17) — 2026-09-07 실측 원본 11건.
 편의정보 원문은 ext_data 파일(raw json)로 보존한다.
 
+2026-09-08: 편의정보 서술 원문을 detail_raw 로 함께 적재한다(01 v1.6.0).
+
 2026-09-07 정정 2건 (실측 근거):
 1. ``flag_from_text`` 가 '없' 만 보고 N 을 반환해 **긍정 서술을 부정으로 뒤집었다**.
    "주출입구는 단차가 없어 휠체어 접근 가능함" -> 종전 N. 안양문화원·안양아트센터·
@@ -15,6 +17,7 @@ Issue #76. areaBasedList2(지역 목록) + detailWithTour2(무장애 편의정�
 from __future__ import annotations
 
 import datetime
+import json
 import os
 from typing import List, Optional
 
@@ -151,6 +154,11 @@ class TourBfCollector(MobilityCollector):
             row[col] = flag_from_text(detail_item.get(src_field))
         for col, fields in MULTI_FIELD_MAP.items():
             row[col] = first_flag(detail_item, fields)
+        # 서술 원문을 그대로 남긴다(01 v1.6.0 detail_raw). 플래그로 접으면
+        # "본관 옆 부스" 같은 위치 설명이 사라지고, 판정 규칙이 바뀌었을 때
+        # 원천을 다시 호출하지 않고는 재파싱할 수 없다.
+        row['detail_raw'] = (json.dumps(detail_item, ensure_ascii=False)
+                             if detail_item else None)
         public_transport = str(detail_item.get('publictransport') or '')
         row['subway_yn'] = 'Y' if '지하철' in public_transport else (None if not public_transport else 'N')
         row['bus_stop_yn'] = 'Y' if '버스' in public_transport else (None if not public_transport else 'N')

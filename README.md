@@ -1,12 +1,14 @@
 # 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
 
-![version](https://img.shields.io/badge/version-v1.14.0-blue)
+![version](https://img.shields.io/badge/version-v1.15.0-blue)
 
 ## 개요
 외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
 
+> v1.15.0 — 무장애여행 편의정보 **원문 보존**(`poi_tour_bf_facility.detail_raw`, 01 v1.6.0)과 **보조기기 수리 서비스센터 적재**(`scripts/load_gg_assist_repair_csv.py` → `poi_emergency_support`) 추가. 원문을 남기면 판정 규칙이 바뀌어도 원천 재호출 없이 다시 파싱할 수 있고, "본관 옆 부스" 같은 위치 설명을 안내에 쓸 수 있다.
+>
 > v1.14.0 — 한국관광공사 무장애여행 파싱 정정. `flag_from_text` 가 '없' 만 보고 부정으로 판정해 "주출입구는 단차가 없어 휠체어 접근 가능함" 같은 **긍정 서술을 뒤집던** 문제를 고치고(안양 4건 실측), 접근로 정본인 `route` 필드와 `auditorium`(장애인 관람석)을 매핑에 추가했다. 안양 13건의 `slope_yn` 이 Y 4건에서 Y 11건으로 정정된다.
 >
 > v1.13.0 — 경기버스정보 **저상버스 노선현황(전일 기준)** 수집기 `GBIS_LOWFLOOR` 추가. 정적 노선 API 에 없던 `tran_bus_route_info.low_bus_yn` 을 페이지 표의 routeId 로 매일 갱신한다(01 v1.5.0 `low_bus_base_dt`). 경로 서비스의 저상버스 우선 모드가 1차 필터로 쓴다.
@@ -168,6 +170,22 @@ python main.py --mode db   --ext-sys GG_TOILET   # (이름+주소) 매칭 동기
 - 이 테이블엔 원천 고유키가 없어 **(이름+주소) 로 기존 행을 찾아 제자리 갱신(id 보존)·미매칭 신규 INSERT·원천에서 사라진 행 논리삭제**를 한 트랜잭션에서 처리한다. 대상 지역은 `GG_TOILET_ADDR_FILTER`(기본 `경기도 안양시`) 로 정한다. 수집 0건이면 무동작, 기존 활성 행의 70% 미만이면 중단
 - 원천에 없는 개방시간 상세(`open_time_detail`)는 매칭된 기존 행의 값을 유지한다
 - 필드 대응 근거·한계는 `docs/poi_public_toilet_info_안양_갱신_GG_TOILET_2026-09-05.md`
+
+## 보조기기 수리 서비스센터 적재 (경기데이터드림 `GG_ASSIST_REPAIR`, v1.15.0)
+
+원천은 경기데이터드림 「경기도_시군별 보조기기 수리 서비스센터 현황」(제공: 경기도장애인복지종합지원센터(누림센터))이다.
+**OpenAPI 가 아니라 파일로 제공되고 갱신 주기가 연 1회**라, KRNA_STN 과 같이 배치 등록 없이 갱신 시 수동 재실행한다.
+
+```bash
+python scripts/load_gg_assist_repair_csv.py --csv data/gg_assist_repair_20260619.csv --base-dt 2026-06-19
+python scripts/load_gg_assist_repair_csv.py --csv <파일> --dry-run      # 파싱 결과만 확인
+python scripts/load_gg_assist_repair_csv.py --csv <파일> --region ""     # 전 시군 적재
+```
+
+- 적재 대상: `poi_emergency_support` (`support_type='repair'`)
+- 기본 범위는 안양 생활권(안양·도 단위 광역 센터·군포·의왕·과천·광명·안산). `--region` 으로 조정한다
+- 원천에 **운영시간 항목이 없다.** 야간 대응 가능 여부 판단에 필요한 값이므로 추정치를 넣지 않고 비워 둔다
+- 전화 `000-000-0000`, 홈페이지 `www.` 는 자리표시자라 빈 값으로 적재한다
 
 ## 저상버스 운행 노선 적재 (경기버스정보 `GBIS_LOWFLOOR`, v1.13.0)
 
