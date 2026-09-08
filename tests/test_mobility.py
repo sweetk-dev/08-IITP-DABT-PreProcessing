@@ -18,7 +18,7 @@ from collectors.mobility_base import to_float, to_yn  # noqa: E402
 from collectors.korail_conv import KorailConvCollector, ANYANG_STATIONS  # noqa: E402
 from collectors.kowsi_facl import (parse_eval_flags, is_dummy_eval, check_api_error,  # noqa: E402
                                    KowsiFaclCollector)
-from collectors.tour_bf import TourBfCollector, flag_from_text  # noqa: E402
+from collectors.tour_bf import TourBfCollector, first_flag, flag_from_text  # noqa: E402
 
 
 class GbisMappingTests(unittest.TestCase):
@@ -368,6 +368,23 @@ class TourBfFlagTests(unittest.TestCase):
         self.assertIsNone(flag_from_text(''))
         self.assertIsNone(flag_from_text(None))
 
+    def test_flag_negative_phrase_is_positive(self):
+        """'없다'가 긍정인 서술 — 종전 규칙이 N 으로 뒤집던 실제 원문(2026-09-07 실측)."""
+        self.assertEqual(flag_from_text('주출입구는 단차가 없어 휠체어 접근 가능함'), 'Y')
+        self.assertEqual(flag_from_text('주 출입구는 턱이 없어 휠체어 접근 가능함'), 'Y')
+        self.assertEqual(flag_from_text('출입구까지 단차가 없어 휠체어 접근 가능함(무단차)'), 'Y')
+        self.assertEqual(flag_from_text('주 출입구 경사로 완만함'), 'Y')
+
+    def test_flag_real_negative(self):
+        self.assertEqual(flag_from_text('휠체어 사용자 이용 어려움'), 'N')
+        self.assertEqual(flag_from_text('경사로 미설치'), 'N')
+
+    def test_first_flag_prefers_route(self):
+        detail = {'route': '출입구까지 경사로가 설치되어 있음', 'exit': '주출입구 단차 없음'}
+        self.assertEqual(first_flag(detail, ('route', 'exit')), 'Y')
+        self.assertEqual(first_flag({'exit': '경사로 있음'}, ('route', 'exit')), 'Y')
+        self.assertIsNone(first_flag({}, ('route', 'exit')))
+
     def test_map_row(self):
         area = {'title': '김중업건축박물관', 'addr1': '경기도 안양시 만안구', 'addr2': '',
                 'mapx': '126.9166', 'mapy': '37.4111', 'contentid': '2464432'}
@@ -381,6 +398,17 @@ class TourBfFlagTests(unittest.TestCase):
         self.assertEqual(row['subway_yn'], 'Y')
         self.assertEqual(row['bus_stop_yn'], 'Y')
         self.assertAlmostEqual(row['latitude'], 37.4111)
+
+    def test_map_row_slope_from_route(self):
+        """slope_yn 은 route 우선 — 종전에는 route 를 아예 안 봤다(2026-09-07)."""
+        area = {'title': '안양문화원', 'addr1': '경기도 안양시 만안구 현충로 53',
+                'mapx': '126.9257', 'mapy': '37.3904', 'contentid': '129858'}
+        detail = {'route': '출입구까지 단차가 없어 휠체어 접근 가능함(무단차)',
+                  'exit': '주출입구는 단차가 없어 휠체어 접근 가능함',
+                  'auditorium': '장애인 전용 관람석 있음'}
+        row = TourBfCollector.map_row(area, detail)
+        self.assertEqual(row['slope_yn'], 'Y')
+        self.assertEqual(row['accessible_room_yn'], 'Y')
 
 
 class RegistryTests(unittest.TestCase):
