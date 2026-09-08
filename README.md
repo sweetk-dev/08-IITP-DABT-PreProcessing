@@ -1,12 +1,14 @@
 # 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
 
-![version](https://img.shields.io/badge/version-v1.12.0-blue)
+![version](https://img.shields.io/badge/version-v1.13.0-blue)
 
 ## 개요
 외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
 
+> v1.13.0 — 경기버스정보 **저상버스 노선현황(전일 기준)** 수집기 `GBIS_LOWFLOOR` 추가. 정적 노선 API 에 없던 `tran_bus_route_info.low_bus_yn` 을 페이지 표의 routeId 로 매일 갱신한다(01 v1.5.0 `low_bus_base_dt`). 경로 서비스의 저상버스 우선 모드가 1차 필터로 쓴다.
+>
 > v1.12.0 — 01 v1.4.0 컬럼 반영. 기구표 항목 「유도 및 안내 설비」→`guide_facility_yn`, 「장애인사용가능객실」→`accessible_room_yn`(숙박시설 외에는 판정하지 않아 NULL), 화장실 남녀공용 →`unisex_yn`. 기존 행은 `scripts/backfill_facility_eval_flags.py` 로 저장된 기구표 원문을 다시 파싱해 채운다(재수집 불필요).
 >
 > v1.11.0 — 경기데이터드림 **공중화장실 현황(제공표준)** 수집기 `GG_TOILET` 추가. 행안부 표준데이터가 좌표 제공을 중단(2025-02)해 17%였던 안양 좌표 보유율을 98%로 올린다. 원천 고유키가 없어 (이름+주소) 매칭으로 제자리 갱신·신규·논리삭제를 한 트랜잭션에서 처리한다.
@@ -164,6 +166,27 @@ python main.py --mode db   --ext-sys GG_TOILET   # (이름+주소) 매칭 동기
 - 이 테이블엔 원천 고유키가 없어 **(이름+주소) 로 기존 행을 찾아 제자리 갱신(id 보존)·미매칭 신규 INSERT·원천에서 사라진 행 논리삭제**를 한 트랜잭션에서 처리한다. 대상 지역은 `GG_TOILET_ADDR_FILTER`(기본 `경기도 안양시`) 로 정한다. 수집 0건이면 무동작, 기존 활성 행의 70% 미만이면 중단
 - 원천에 없는 개방시간 상세(`open_time_detail`)는 매칭된 기존 행의 값을 유지한다
 - 필드 대응 근거·한계는 `docs/poi_public_toilet_info_안양_갱신_GG_TOILET_2026-09-05.md`
+
+## 저상버스 운행 노선 적재 (경기버스정보 `GBIS_LOWFLOOR`, v1.13.0)
+
+GBIS 정적 노선 API(`getBusRouteInfoItemv2`)에는 저상버스 항목이 없어 `tran_bus_route_info.low_bus_yn` 이 비어 있었다.
+경기버스정보 저상버스 노선현황 페이지(`lowfloorBus.action?cmd=lowfloorAuto`, "어제 기준" 집계)는 경기도 전 노선의
+저상 운행 목록을 한 페이지에 주고, 노선번호 셀에 GBIS `routeId` 가 함께 있다. 인증키는 필요 없다.
+
+```bash
+python main.py --mode file --ext-sys GBIS_LOWFLOOR   # ext_data/GBIS_LOWFLOOR/<날짜>/rows.json 만 저장
+python main.py --mode db   --ext-sys GBIS_LOWFLOOR   # low_bus_yn / low_bus_base_dt 갱신
+```
+
+- 매칭은 **routeId** 로 한다. 같은 노선번호가 여러 운수사에 있어(5번 삼영운수/안양-편안운수, 6번 삼영운수/안양-학운교통, 9번 안양-신안운수/삼영운수) 번호 매칭은 쓰지 않는다. 노선번호·기점·종점·운행시간대·배차간격·운수사는 원본 보존용
+- 표에 있는 노선 `Y`, 경기도 관할(`admin_name`) 노선 중 표에 없는 노선 `N`, `low_bus_base_dt` = 수집일 전일. 페이지를 못 읽거나 행이 0건이면 기존 값을 건드리지 않는다
+- 운행시간대·배차가 비어 있는 행(주말만 운행하는 노선 등)은 해당 요일만 `null` 로 둔다
+- 표는 어제 기준이므로 **매일 1회** 실행한다. 실시간 차량 단위 저상 여부(lowPlate)는 경로 서비스가 직접 조회한다
+
+```bash
+# crontab 예시 — 매일 04:30
+30 4 * * * cd <PROJECT_DIR> && EXT_SYS=GBIS_LOWFLOOR <PROJECT_DIR>/scripts/run_collect.sh >> <PROJECT_DIR>/logs/cron.log 2>&1
+```
 
 ## 건물 편의시설 플래그 백필 (`KOWSI_FACL`, v1.12.0)
 

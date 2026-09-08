@@ -2,6 +2,7 @@
 
 대상 테이블(01-IITP-DABT-Database):
 - tran_bus_route_info          (GBIS)          ON CONFLICT (route_id)
+- tran_bus_route_info.low_bus_yn (GBIS_LOWFLOOR) routeId 매칭 UPDATE (Issue #97)
 - tran_bus_station_info        (GBIS)          ON CONFLICT (station_id)
 - tran_bus_route_station       (GBIS)          ON CONFLICT (route_id, station_id, station_seq)
 - poi_station_access_status    (KORAIL_CONV)   ON CONFLICT (stn_cd)
@@ -73,6 +74,37 @@ def upsert_bus_routes(rows: List[dict]) -> int:
         " base_dt=EXCLUDED.base_dt, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
     )
     return _execute_batch(sql, rows)
+
+
+def update_bus_route_low_floor(rows: List[dict]) -> int:
+    """tran_bus_route_info.low_bus_yn / low_bus_base_dt 갱신 — Issue #97.
+
+    rows: collectors.gbis_lowfloor 행(route_id, low_bus_base_dt). 표에 있는 노선은 'Y',
+    경기도 관할(admin_name '경기도%') 노선 중 표에 없는 노선은 'N'. 그 밖의 노선은 손대지 않는다.
+    빈 rows 는 원천 장애로 보고 아무것도 갱신하지 않는다(기존 값 보존).
+    반환: 갱신 행 수(Y + N).
+    """
+    ids = sorted({int(r['route_id']) for r in rows if r.get('route_id') is not None})
+    if not ids:
+        logger.warning('GBIS_LOWFLOOR: 갱신할 routeId 가 없어 low_bus_yn 을 건드리지 않습니다')
+        return 0
+    base_dt = next((r.get('low_bus_base_dt') for r in rows if r.get('low_bus_base_dt')), None)
+    if engine is None:
+        return 0
+    with engine.begin() as conn:
+        y = conn.execute(text(
+            "UPDATE tran_bus_route_info SET low_bus_yn='Y', low_bus_base_dt=CAST(:base_dt AS date),"
+            " updated_at=CURRENT_TIMESTAMP, updated_by=:by"
+            " WHERE route_id = ANY(:ids) AND COALESCE(del_yn,'N')='N'"
+        ), {'ids': ids, 'base_dt': base_dt, 'by': CREATED_BY}).rowcount
+        n = conn.execute(text(
+            "UPDATE tran_bus_route_info SET low_bus_yn='N', low_bus_base_dt=CAST(:base_dt AS date),"
+            " updated_at=CURRENT_TIMESTAMP, updated_by=:by"
+            " WHERE NOT (route_id = ANY(:ids)) AND COALESCE(del_yn,'N')='N'"
+            "   AND COALESCE(admin_name,'') LIKE '경기도%'"
+        ), {'ids': ids, 'base_dt': base_dt, 'by': CREATED_BY}).rowcount
+    logger.info('GBIS_LOWFLOOR: low_bus_yn Y=%d N=%d (기준일 %s, 표 routeId %d건)', y, n, base_dt, len(ids))
+    return int(y or 0) + int(n or 0)
 
 
 def upsert_bus_stations(rows: List[dict]) -> int:
