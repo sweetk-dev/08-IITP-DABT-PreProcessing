@@ -1,12 +1,14 @@
 # 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
 
-![version](https://img.shields.io/badge/version-v1.13.0-blue)
+![version](https://img.shields.io/badge/version-v1.14.0-blue)
 
 ## 개요
 외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
 
+> v1.14.0 — 한국관광공사 무장애여행 파싱 정정. `flag_from_text` 가 '없' 만 보고 부정으로 판정해 "주출입구는 단차가 없어 휠체어 접근 가능함" 같은 **긍정 서술을 뒤집던** 문제를 고치고(안양 4건 실측), 접근로 정본인 `route` 필드와 `auditorium`(장애인 관람석)을 매핑에 추가했다. 안양 13건의 `slope_yn` 이 Y 4건에서 Y 11건으로 정정된다.
+>
 > v1.13.0 — 경기버스정보 **저상버스 노선현황(전일 기준)** 수집기 `GBIS_LOWFLOOR` 추가. 정적 노선 API 에 없던 `tran_bus_route_info.low_bus_yn` 을 페이지 표의 routeId 로 매일 갱신한다(01 v1.5.0 `low_bus_base_dt`). 경로 서비스의 저상버스 우선 모드가 1차 필터로 쓴다.
 >
 > v1.12.0 — 01 v1.4.0 컬럼 반영. 기구표 항목 「유도 및 안내 설비」→`guide_facility_yn`, 「장애인사용가능객실」→`accessible_room_yn`(숙박시설 외에는 판정하지 않아 NULL), 화장실 남녀공용 →`unisex_yn`. 기존 행은 `scripts/backfill_facility_eval_flags.py` 로 저장된 기구표 원문을 다시 파싱해 채운다(재수집 불필요).
