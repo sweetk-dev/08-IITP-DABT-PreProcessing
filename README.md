@@ -1,11 +1,13 @@
 # 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
 
-![version](https://img.shields.io/badge/version-v1.15.0-blue)
+![version](https://img.shields.io/badge/version-v1.16.0-blue)
 
 ## 개요
 외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
+
+> v1.16.0 — 긴급대응 수리센터 전국 원천 2종 추가와 충전기 설치 지점 보존. 국민건강보험공단 **보조기기 급여 등록업소**(`scripts/load_nhis_assist_store_csv.py`, 전동휠체어 취급 전국 2,022건, 주소·전화 보유)와 중앙보조기기센터 **전국 보조기기센터 33곳**(`scripts/load_knat_center_csv.py`)을 넣는다. 지정업체 명부의 시군구는 사업장 위치가 아니라 수리비를 지원하는 관할이라, 등록업소 주소로 실제 위치를 채운다. 충전기는 01 v1.7.0 `install_desc` 를 채워 같은 건물의 설치 지점을 개별 행으로 보존한다(병합 시 195행 소실되던 문제).
 
 > v1.15.0 — 무장애여행 편의정보 **원문 보존**(`poi_tour_bf_facility.detail_raw`, 01 v1.6.0)과 **보조기기 수리 서비스센터 적재**(`scripts/load_gg_assist_repair_csv.py` → `poi_emergency_support`) 추가. 원문을 남기면 판정 규칙이 바뀌어도 원천 재호출 없이 다시 파싱할 수 있고, "본관 옆 부스" 같은 위치 설명을 안내에 쓸 수 있다.
 >

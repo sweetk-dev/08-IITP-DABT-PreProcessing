@@ -359,20 +359,26 @@ def upsert_tour_bf(rows: List[dict]) -> int:
 
 
 def upsert_emergency_support(rows: List[dict]) -> int:
-    """poi_emergency_support — (유형, 이름, 도로명주소) 복합 자연키.
+    """poi_emergency_support — (유형, 이름, 도로명주소, 설치지점) 복합 자연키.
 
     같은 이름의 지회가 시군마다 있어 이름만으로는 구분되지 않는다(예: 경기도지체
     장애인협회 OO시지회). 주소를 키에 넣어야 시군 간 충돌이 없다.
+
+    install_desc 는 01 v1.7.0 에서 키에 추가됐다. 같은 건물에 충전기가 여러 대
+    설치된 경우(김포시청 제3별관 로비 / 민원동 장애인화장실 옆)를 구분한다.
+    좌표까지 다른 사례가 있어(운정중앙역 환승센터 북측·남측 대합실) 병합하면
+    정보가 사라진다. 수리센터·콜택시는 NULL 이라 종전과 동일하게 동작한다.
     """
     sql = (
         "INSERT INTO poi_emergency_support ("
         " support_type, sido_code, sgg_name, name, addr_road, addr_jibun, zip_code,"
-        " latitude, longitude, tel, homepage, open_hours, note, source, confidence,"
-        " base_dt, created_by)"
+        " latitude, longitude, tel, homepage, open_hours, install_desc, note, source,"
+        " confidence, base_dt, created_by)"
         " VALUES (:support_type, :sido_code, :sgg_name, :name, :addr_road, :addr_jibun, :zip_code,"
-        " :latitude, :longitude, :tel, :homepage, :open_hours, :note, :source, :confidence,"
-        " CAST(:base_dt AS date), :created_by)"
-        " ON CONFLICT (support_type, name, coalesce(addr_road, '')) DO UPDATE SET"
+        " :latitude, :longitude, :tel, :homepage, :open_hours, :install_desc, :note, :source,"
+        " :confidence, CAST(:base_dt AS date), :created_by)"
+        " ON CONFLICT (support_type, name, coalesce(addr_road, ''), coalesce(install_desc, ''))"
+        " DO UPDATE SET"
         " sido_code=EXCLUDED.sido_code, sgg_name=EXCLUDED.sgg_name,"
         " addr_jibun=EXCLUDED.addr_jibun, zip_code=EXCLUDED.zip_code,"
         " latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude,"
@@ -381,6 +387,9 @@ def upsert_emergency_support(rows: List[dict]) -> int:
         " base_dt=EXCLUDED.base_dt, del_yn='N', deleted_at=NULL, deleted_by=NULL,"
         " updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
     )
+    # install_desc 를 안 넣는 기존 호출부(수리센터·콜택시 로더)도 그대로 돌도록 채운다
+    for row in rows:
+        row.setdefault('install_desc', None)
     return _execute_batch(sql, rows)
 
 
