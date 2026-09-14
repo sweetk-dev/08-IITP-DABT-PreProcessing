@@ -1,6 +1,6 @@
 # 장애인 이동편의 공공데이터 멀티소스 수집·전처리 툴
 
-![version](https://img.shields.io/badge/version-v1.16.0-blue)
+![version](https://img.shields.io/badge/version-v1.16.1-blue)
 
 ## 개요
 장애인 이동편의·편의시설 관련 공공데이터를 소스별 수집 어댑터로 수집해, 파일 저장·정제·DB 적재까지 처리하는 Python 기반 툴입니다.
