@@ -1,9 +1,16 @@
-# 외부 통계 API 연동 및 파일/DB 저장 툴 (KOSIS 등 멀티소스)
+# 장애인 이동편의 공공데이터 멀티소스 수집·전처리 툴
 
-![version](https://img.shields.io/badge/version-v1.16.0-blue)
+![version](https://img.shields.io/badge/version-v1.16.1-blue)
 
 ## 개요
-외부 통계 API(현재 KOSIS, 향후 공공데이터포털·마이크로데이터 등) 데이터를 API를 통해 수집하여, 옵션에 따라 파일로 저장하거나 파일 저장 후 DB에 삽입하는 Python 기반 툴입니다.
+장애인 이동편의·편의시설 관련 공공데이터를 소스별 수집 어댑터로 수집해, 파일 저장·정제·DB 적재까지 처리하는 Python 기반 툴입니다.
+`--ext-sys` 로 수집 대상 소스를 선택하며, 미지정 시 KOSIS 가 default 입니다(후방호환).
+
+- 수집 어댑터 7종 — KOSIS 통계 / 한국관광공사 무장애여행(TOUR_BF_API) / 경기버스정보 노선·저상버스(GBIS·GBIS_LOWFLOOR) / 경기데이터드림 공중화장실(GG_TOILET) / 철도 역사 편의시설(KORAIL_CONV) / 장애인편의시설(KOWSI_FACL)
+- 옵션에 따라 파일 저장만 또는 DB 적재까지 수행
+- 통합 테이블 자동 이관 · 과거 데이터 정리
+- 보조기기 수리센터·충전기 등 CSV 원천 적재 스크립트 별도 제공
+- 현행 아키텍처: [docs/design/107-current-architecture.md](docs/design/107-current-architecture.md)
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
 
