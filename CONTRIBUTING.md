@@ -1,6 +1,6 @@
 # Contributing — 08-IITP-DABT-PreProcessing
 
-> KOSIS(국가통계포털) API 연동 데이터 전처리 모듈
+> 장애인 이동편의 공공데이터 멀티소스 수집·전처리 모듈
 
 이 문서는 **08-IITP-DABT-PreProcessing** 레포에 기여하는 모든 개발자를 위한 거버넌스 가이드입니다.  **유의적 버전 관리(SemVer)** 표준과 **forward-only** 정책을 따릅니다.
 
