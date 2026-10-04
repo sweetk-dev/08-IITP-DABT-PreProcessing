@@ -19,7 +19,7 @@ import datetime
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from collectors.mobility_base import MobilityCollector, to_int
 

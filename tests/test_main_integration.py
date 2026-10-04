@@ -207,5 +207,152 @@ class MultiSourceRoutingTests(unittest.TestCase):
         self.assertFalse(instance.is_retryable_error({'err': '31'}))
 
 
+# ---------------------------------------------------------------------------
+# Suite 4 — 통계 단위 수집 격리와 종료 코드
+# ---------------------------------------------------------------------------
+class CollectIsolationTests(unittest.TestCase):
+    """통계 1건의 수집 예외가 배치 전체를 중단시키지 않는다. 실패가 있으면 종료 코드는 0 이 아니다."""
+
+    STATS = [{'stat_tbl_id': 'DT_OK1', 'ext_api_id': 1},
+             {'stat_tbl_id': 'DT_BAD', 'ext_api_id': 1},
+             {'stat_tbl_id': 'DT_OK2', 'ext_api_id': 1}]
+
+    @staticmethod
+    def _fake_save_single_file(args):
+        _api_info, stats_src, _dirs, _data_info = args
+        stat_tbl_id = stats_src['stat_tbl_id']
+        if stat_tbl_id == 'DT_BAD':
+            try:
+                raise RuntimeError('KOSIS data API 오류 응답: err=20, errMsg=필수요청변수값 누락')
+            except RuntimeError as cause:
+                # 실제 save_single_file 과 같은 모양: 일반 문구의 예외로 감싸 올린다
+                raise RuntimeError('[DT_BAD] save_single_file - 파일 저장 실패') from cause
+        return {'stat_tbl_id': stat_tbl_id}
+
+    def test_save_all_files_continues_after_one_failure(self):
+        failed = []
+        with patch.object(main_module, 'save_single_file', side_effect=self._fake_save_single_file):
+            saved = main_module.save_all_files({}, self.STATS, {}, {}, failed_out=failed)
+        self.assertEqual(sorted(s['stat_tbl_id'] for s in saved), ['DT_OK1', 'DT_OK2'])
+        self.assertEqual([f[0] for f in failed], ['DT_BAD'])
+        # 요약에 남길 사유는 감싼 문구가 아니라 원인 예외의 내용이다
+        self.assertIn('err=20', failed[0][1])
+
+    def test_save_all_files_without_failed_out_still_continues(self):
+        with patch.object(main_module, 'save_single_file', side_effect=self._fake_save_single_file):
+            saved = main_module.save_all_files({}, self.STATS, {}, {})
+        self.assertEqual(len(saved), 2)
+
+    def _run_main(self, mode, db_result=None):
+        """main() 을 외부 의존(DB·네트워크·로그 파일) 없이 실행하고 (종료코드, 요약, DB 호출 인자)를 돌려준다."""
+        captured = {}
+        db_calls = []
+
+        def fake_db(saved, api_info, stats_src_list, info, collect_failed=None):
+            db_calls.append({'saved': [s['stat_tbl_id'] for s in saved],
+                             'collect_failed': list(collect_failed or [])})
+            return db_result if db_result is not None else {
+                'succeeded': [s['stat_tbl_id'] for s in saved], 'failed': []}
+
+        class _Args:
+            ext_sys = 'KOSIS'
+
+        _Args.mode = mode
+        with patch.object(main_module, 'setup_logging'), \
+                patch.object(main_module, 'parse_args', return_value=_Args), \
+                patch.object(main_module, 'check_required_env_and_args'), \
+                patch.object(main_module, 'get_data_collection_scope', return_value='ALL'), \
+                patch.object(main_module, 'get_filtered_stats_src_list',
+                             return_value=({'ext_api_id': 1}, self.STATS, None)), \
+                patch.object(main_module, 'prepare_data_directories', return_value={'ext_sys': 'KOSIS'}), \
+                patch.object(main_module, 'get_stats_src_data_info', return_value={}), \
+                patch.object(main_module, 'save_single_file', side_effect=self._fake_save_single_file), \
+                patch.object(main_module, 'process_db_insertion', side_effect=fake_db), \
+                patch.object(main_module, 'write_run_summary', side_effect=captured.update):
+            with self.assertRaises(SystemExit) as cm:
+                main_module.main()
+        return cm.exception.code, captured, db_calls
+
+    def test_file_mode_exit_code_is_2_when_one_statistic_fails(self):
+        code, summary, db_calls = self._run_main('file')
+        self.assertEqual(code, 2)
+        self.assertEqual(summary['status'], 'PARTIAL')
+        self.assertEqual((summary['targets'], summary['files_ok']), (3, 2))
+        self.assertIn('collect_fail:DT_BAD(', summary['error'])
+        self.assertIn('err=20', summary['error'])
+        self.assertEqual(db_calls, [])
+
+    def test_db_mode_loads_remaining_statistics_and_exits_2(self):
+        code, summary, db_calls = self._run_main('db')
+        self.assertEqual(code, 2)
+        self.assertEqual(summary['status'], 'PARTIAL')
+        # 수집에 성공한 통계는 DB 단계로 넘어가고, 실패 목록도 함께 전달된다
+        self.assertEqual(sorted(db_calls[0]['saved']), ['DT_OK1', 'DT_OK2'])
+        self.assertEqual([f[0] for f in db_calls[0]['collect_failed']], ['DT_BAD'])
+        self.assertEqual((summary['db_ok'], summary['db_fail']), (2, 0))
+
+    def test_exit_code_is_0_when_every_statistic_succeeds(self):
+        with patch.object(CollectIsolationTests, 'STATS', [s for s in self.STATS if s['stat_tbl_id'] != 'DT_BAD']):
+            code, summary, db_calls = self._run_main('db')
+        self.assertEqual(code, 0)
+        self.assertEqual(summary['status'], 'SUCCESS')
+        self.assertIsNone(summary['error'])
+        self.assertEqual(db_calls[0]['collect_failed'], [])
+
+    def test_db_failure_reason_is_written_to_summary(self):
+        db_result = {'succeeded': ['DT_OK1'],
+                     'failed': [('DT_OK2', '[DT_OK2] 적재 중단(기존 데이터 유지): 응답이 빈 리스트')]}
+        code, summary, _ = self._run_main('db', db_result=db_result)
+        self.assertEqual(code, 2)
+        self.assertEqual((summary['db_ok'], summary['db_fail']), (1, 1))
+        self.assertIn('db_fail:DT_OK2(', summary['error'])
+        self.assertIn('빈 리스트', summary['error'])
+        self.assertIn('collect_fail:DT_BAD(', summary['error'])
+
+    # --- 수집 전부 실패 → 치명적 오류(종료 코드 1) ---------------------------
+    @staticmethod
+    def _fake_save_all_fail(args):
+        """모든 통계의 수집이 실패하는 상황(인증키 만료·원천 전체 장애) — 실제 예외 모양을 따른다."""
+        _api_info, stats_src, _dirs, _data_info = args
+        stat_tbl_id = stats_src['stat_tbl_id']
+        try:
+            raise RuntimeError('KOSIS API 처리 중단(meta): HTTP 503')
+        except RuntimeError as cause:
+            raise RuntimeError('[%s] save_single_file - 파일 저장 실패' % stat_tbl_id) from cause
+
+    def _run_main_all_fail(self, mode):
+        # 클래스 속성을 바꿔 끼우므로 staticmethod 로 감싼다(감싸지 않으면 self 가 첫 인자로 넘어간다).
+        with patch.object(CollectIsolationTests, '_fake_save_single_file',
+                          staticmethod(CollectIsolationTests._fake_save_all_fail)):
+            return self._run_main(mode)
+
+    def test_file_mode_exit_code_is_1_when_every_statistic_fails(self):
+        code, summary, db_calls = self._run_main_all_fail('file')
+        self.assertEqual(code, 1)
+        self.assertEqual(summary['status'], 'ERROR')
+        self.assertEqual((summary['targets'], summary['files_ok']), (3, 0))
+        # 사유는 부분 완료 때와 같은 형식으로 남고, HTTP 상태 코드가 들어 있다
+        self.assertIn('collect_fail:', summary['error'])
+        self.assertIn('DT_OK1(', summary['error'])
+        self.assertIn('HTTP 503', summary['error'])
+        self.assertEqual(db_calls, [])
+
+    def test_db_mode_exit_code_is_1_when_every_statistic_fails(self):
+        code, summary, db_calls = self._run_main_all_fail('db')
+        self.assertEqual(code, 1)
+        self.assertEqual(summary['status'], 'ERROR')
+        self.assertEqual((summary['files_ok'], summary['db_ok'], summary['db_fail']), (0, 0, 0))
+        # 적재 단계에는 처리할 통계가 넘어가지 않는다(기존 데이터 유지)
+        self.assertEqual(db_calls[0]['saved'], [])
+        self.assertEqual(len(db_calls[0]['collect_failed']), 3)
+
+    def test_no_targets_is_not_treated_as_total_failure(self):
+        """대상이 0건이면 "전부 실패"가 아니다 — 종전처럼 정상 종료한다."""
+        with patch.object(CollectIsolationTests, 'STATS', []):
+            code, summary, _ = self._run_main('file')
+        self.assertEqual(code, 0)
+        self.assertEqual(summary['status'], 'SUCCESS')
+
+
 if __name__ == '__main__':
     unittest.main()

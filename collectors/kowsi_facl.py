@@ -169,6 +169,26 @@ class KowsiFaclCollector(MobilityCollector):
         with open(self.state_path, 'w', encoding='utf-8') as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
+    def commit_state(self) -> bool:
+        """collect() 가 계산해 둔 다음 진행 상태(next_page / cycle_completed_at)를 상태 파일에 쓴다.
+
+        collect() 는 상태를 파일에 쓰지 않고 ``self._pending_state`` 에만 둔다. 스캔 직후에
+        바로 저장하면, 그 뒤의 기구표 조회·원본 파일 저장·DB 적재 중 하나가 실패했을 때
+        이번에 스캔한 페이지 구간이 "처리 완료"로 남아 다음 실행이 그 구간을 건너뛴다.
+        전 페이지 완주 직후라면 재스캔 주기(KOWSI_RESCAN_DAYS, 기본 28일) 동안 다시 읽지 않는다.
+        그래서 호출자(mobility_pipeline.run_mobility)가 DB 적재에 성공한 뒤에만 이 메서드를 부른다.
+
+        반환: 저장했으면 True, 저장할 상태가 없으면(collect 미실행·재스캔 주기 skip) False.
+        실패 시 동작: 파일 쓰기 예외(OSError)는 그대로 전파한다. 이 경우 상태가 전진하지 않아
+            다음 실행이 같은 구간을 다시 스캔한다(적재는 UPSERT 라 중복 행이 생기지 않는다).
+        """
+        state = getattr(self, '_pending_state', None)
+        if state is None:
+            return False
+        self.save_state(state)
+        self._pending_state = None
+        return True
+
     def _recently_completed(self, state: dict) -> bool:
         completed = state.get('cycle_completed_at')
         if not completed or int(state.get('next_page', 1)) != 1:
@@ -232,6 +252,8 @@ class KowsiFaclCollector(MobilityCollector):
 
     # --- 수집 (#78 분할) ------------------------------------------------------
     def collect(self) -> List[dict]:
+        # 이번 실행에서 확정할 진행 상태. 적재 성공 뒤 commit_state() 가 파일에 쓴다.
+        self._pending_state = None
         state = self.load_state()
         if self._recently_completed(state):
             logger.info(
@@ -265,7 +287,8 @@ class KowsiFaclCollector(MobilityCollector):
         else:
             state['next_page'] = end_page + 1
             logger.info('KOWSI_FACL: p%d~p%d 스캔 — 다음 실행 p%d부터 이어받기', start_page, end_page, end_page + 1)
-        self.save_state(state)
+        # 여기서 파일에 저장하지 않는다(이유는 commit_state docstring 참고).
+        self._pending_state = state
 
         if self.fetch_eval:
             # 기구표는 wfcltId(건물) 단위다. 한 건물에 여러 시설이 등록돼 있으면

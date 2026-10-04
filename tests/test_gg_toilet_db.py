@@ -1,6 +1,6 @@
 """GG_TOILET 적재기 통합 테스트 — 실제 PostgreSQL 이 있을 때만 돈다.
 
-ITEST_DB_URL(또는 DB_URL) 이 설정된 환경에서 임시 테이블을 만들어
+ITEST_DB_URL 이 설정된 환경에서만(DB_URL 만 있으면 건너뜀) 임시 테이블을 만들어
 [기존 행 → 1차 동기화 → 2차 재실행(멱등)] 을 검증한다. 원본 테이블은 건드리지 않는다.
 """
 from __future__ import annotations
@@ -15,7 +15,12 @@ if ROOT not in sys.path:
 
 from db_mobility import public_toilet_match_keys  # noqa: E402
 
-ITEST_URL = os.getenv('ITEST_DB_URL') or os.getenv('DB_URL')
+# 통합 테스트 대상 DB 는 ITEST_DB_URL 로만 정한다(DB_URL 로 대신하지 않는다).
+# config.py / db.py 는 임포트 시점에 .env 를 읽어 DB_URL 을 환경변수로 올린다. DB_URL 을
+# 대신 쓰면 .env 가 있는 배포 폴더에서 테스트를 돌렸을 때 배치가 쓰는 DB 에서
+# 통합 테스트(테스트 테이블 생성·삭제, 표식 행 삽입·삭제)가 실행된다.
+# 빈 문자열도 "미설정"으로 본다.
+ITEST_URL = os.getenv('ITEST_DB_URL') or None
 TABLE = 'poi_public_toilet_info_itest'
 
 
@@ -58,15 +63,21 @@ class MatchKeyTests(unittest.TestCase):
         self.assertEqual(len(keys), 2)
 
 
-@unittest.skipUnless(ITEST_URL, 'ITEST_DB_URL/DB_URL 미설정 — DB 통합 테스트 생략')
+@unittest.skipUnless(ITEST_URL, 'ITEST_DB_URL 미설정 — DB 통합 테스트 생략')
 class SyncPublicToiletsDbTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import db_mobility
-        from sqlalchemy import text
+        from sqlalchemy import create_engine, text
         cls.db_mobility = db_mobility
         cls.text = staticmethod(text)
-        cls.engine = db_mobility.engine
+        # db_mobility.engine 은 DB_URL 로 만든 엔진이다. 그대로 쓰면 ITEST_DB_URL 과 DB_URL 이
+        # 다른 환경에서 테스트 테이블 생성·삭제가 DB_URL 쪽 DB 에서 실행된다(DB_URL 이 없으면
+        # 엔진이 None 이라 실행 자체가 안 된다). ITEST_DB_URL 로 만든 엔진을 바꿔 끼우고
+        # 끝나면 원래 엔진으로 되돌린다.
+        cls.engine = create_engine(ITEST_URL)
+        cls._orig_engine = db_mobility.engine
+        db_mobility.engine = cls.engine
         with cls.engine.begin() as conn:
             conn.execute(text('DROP TABLE IF EXISTS ' + TABLE))
             conn.execute(text('CREATE TABLE ' + TABLE +
@@ -79,6 +90,8 @@ class SyncPublicToiletsDbTests(unittest.TestCase):
         cls.db_mobility.PUBLIC_TOILET_TABLE = cls._orig_table
         with cls.engine.begin() as conn:
             conn.execute(cls.text('DROP TABLE IF EXISTS ' + TABLE))
+        cls.db_mobility.engine = cls._orig_engine
+        cls.engine.dispose()
 
     def setUp(self):
         with self.engine.begin() as conn:

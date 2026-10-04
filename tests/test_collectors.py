@@ -158,3 +158,80 @@ class KosisCollectorParityTests(unittest.TestCase):
             legacy_out = legacy.fetch_kosis_data({}, {}, {})
             adapter_out = KosisCollector({}, {}).fetch_data({})
         self.assertEqual(legacy_out, adapter_out)
+
+
+# ---------------------------------------------------------------------------
+# 인증키 마스킹 — apiKey / serviceKey / KEY, 요청 예외 문자열 포함
+# ---------------------------------------------------------------------------
+class AuthMaskingTests(unittest.TestCase):
+    """http_get 의 실패 로그·예외 메시지에 인증키가 남지 않는다."""
+
+    SECRET = 'SvcKey%2BSECRET=='
+
+    def _collector(self):
+        class _C(BaseCollector):
+            EXT_SYS = 'MASKTEST'
+
+            def fetch_meta(self, data_info):
+                return ''
+
+            def fetch_latest(self, data_info):
+                return ''
+
+            def fetch_data(self, data_info):
+                return []
+
+            def is_retryable_error(self, response):
+                return False
+
+        return _C(api_info={}, stats_src={})
+
+    def test_mask_url_covers_service_key_and_key(self):
+        from collectors.base import _mask_url
+        self.assertEqual(_mask_url('https://h/p?serviceKey=abc&pageNo=1'), 'https://h/p?serviceKey=***&pageNo=1')
+        self.assertEqual(_mask_url('https://h/p?KEY=abc&Type=json'), 'https://h/p?KEY=***&Type=json')
+        self.assertEqual(_mask_url('https://h/p?apikey=abc'), 'https://h/p?apikey=***')
+        # 이름이 key 로 끝나는 다른 파라미터는 건드리지 않는다
+        self.assertEqual(_mask_url('https://h/p?monkey=1&KEY=abc'), 'https://h/p?monkey=1&KEY=***')
+
+    def test_request_exception_message_is_masked(self):
+        import logging
+        import traceback
+        import requests
+
+        for param in ('serviceKey', 'KEY'):
+            url = 'https://api.example/list?%s=%s&pageNo=1' % (param, self.SECRET)
+
+            def boom(_url, timeout=None):
+                raise requests.exceptions.ConnectionError(
+                    "HTTPSConnectionPool(host='api.example', port=443): Max retries exceeded with url: "
+                    "/list?%s=%s&pageNo=1 (Caused by NewConnectionError('refused'))" % (param, self.SECRET))
+
+            with self.subTest(param=param):
+                with patch('collectors.base.requests.get', side_effect=boom), \
+                        self.assertLogs('collectors.base', level=logging.WARNING) as logs:
+                    try:
+                        self._collector().http_get(url, retries=0, backoff_sec=0)
+                        self.fail('RuntimeError 가 올라와야 한다')
+                    except RuntimeError as exc:
+                        message = str(exc)
+                        rendered = traceback.format_exc()
+                log_text = '\n'.join(r.getMessage() for r in logs.records)
+                for where, text in (('log', log_text), ('message', message), ('traceback', rendered)):
+                    self.assertNotIn(self.SECRET, text, where)
+                self.assertIn(param + '=***', message)
+                self.assertIn('ConnectionError', message)
+
+    def test_non_200_log_is_masked(self):
+        import logging
+
+        class _Resp:
+            status_code = 500
+            text = 'server error'
+
+        url = 'https://api.example/list?serviceKey=%s&pageNo=1' % self.SECRET
+        with patch('collectors.base.requests.get', return_value=_Resp()), \
+                self.assertLogs('collectors.base', level=logging.WARNING) as logs:
+            with self.assertRaises(RuntimeError):
+                self._collector().http_get(url, retries=0, backoff_sec=0)
+        self.assertNotIn(self.SECRET, '\n'.join(r.getMessage() for r in logs.records))

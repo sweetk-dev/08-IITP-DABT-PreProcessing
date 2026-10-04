@@ -2,7 +2,7 @@ import logging
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
-from config import get_db_url, get_kosis_sys
+from config import get_db_url
 
 load_dotenv()
 
@@ -16,8 +16,6 @@ engine = create_engine(
 Session = sessionmaker(bind=engine) if engine else None
 
 db_logger = logging.getLogger('db')
-
-EXT_SYS_KOSIS = get_kosis_sys()
 
 def set_timezone(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
