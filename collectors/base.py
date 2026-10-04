@@ -23,12 +23,18 @@ from typing import Any, Optional, Union
 
 import requests
 
+from file_utils import mask_auth_in_text
+
 
 def _mask_url(url):
-    """로그 출력용 URL 인증키 마스킹"""
-    if not url:
-        return url
-    return re.sub(r"(apiKey=)[^&]+", r"\1***", str(url), flags=re.IGNORECASE)
+    """로그 출력용 URL 인증키 마스킹.
+
+    apiKey(KOSIS) 뿐 아니라 serviceKey(공공데이터포털 계열)·KEY(경기데이터드림)도 가린다.
+    이동편의 수집기는 전부 serviceKey / KEY 를 쓰므로 apiKey 만 가리면 요청 실패 로그에
+    인증키가 그대로 남는다. 규칙은 file_utils.mask_auth_in_text 한 곳에서 관리한다
+    (kosis_api.mask_auth_in_url 도 같은 함수를 쓴다).
+    """
+    return mask_auth_in_text(url)
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +136,20 @@ class BaseCollector(ABC):
                     _mask_url(url),
                     attempt,
                     attempts,
-                    exc,
+                    # requests 예외 문자열에는 요청 URL(쿼리의 인증키 포함)이 그대로 들어 있다.
+                    # 예: "HTTPSConnectionPool(...): Max retries exceeded with url: /x?serviceKey=..."
+                    _mask_url(exc),
                 )
                 if attempt >= attempts:
+                    # (1) 메시지에 담는 예외 문자열도 마스킹한다 — 이 RuntimeError 는 상위에서
+                    #     로그·실행 요약(run_summary.log)에 그대로 기록된다.
+                    # (2) "from None" 으로 원인 예외 연결을 끊는다. 연결해 두면 상위에서
+                    #     exc_info=True 로 남기는 트레이스백에 원본 예외 문자열(마스킹 전 URL)이
+                    #     함께 출력된다. 진단에 필요한 예외 종류는 메시지에 클래스명으로 남긴다.
                     raise RuntimeError(
-                        f"{self.EXT_SYS or 'BASE'} GET exception: {exc}"
-                    ) from last_exc
+                        f"{self.EXT_SYS or 'BASE'} GET exception: "
+                        f"{type(exc).__name__}: {_mask_url(exc)}"
+                    ) from None
             time.sleep(backoff_sec)
         # Unreachable, but keep mypy happy.
         raise RuntimeError(f"{self.EXT_SYS or 'BASE'} GET unreachable state")

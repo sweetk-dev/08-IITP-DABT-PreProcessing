@@ -300,11 +300,22 @@ def upsert_facilities(rows: List[dict]) -> int:
         " ON CONFLICT (facl_inf_id) DO UPDATE SET"
         " wfclt_id=EXCLUDED.wfclt_id, facl_name=EXCLUDED.facl_name, facl_type=EXCLUDED.facl_type,"
         " addr=EXCLUDED.addr, latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude,"
-        " estb_date=EXCLUDED.estb_date, elevator_yn=EXCLUDED.elevator_yn,"
-        " dis_toilet_yn=EXCLUDED.dis_toilet_yn, dis_parking_yn=EXCLUDED.dis_parking_yn,"
-        " entrance_ramp_yn=EXCLUDED.entrance_ramp_yn, entrance_door_yn=EXCLUDED.entrance_door_yn,"
-        " approach_road_yn=EXCLUDED.approach_road_yn, guide_facility_yn=EXCLUDED.guide_facility_yn,"
-        " accessible_room_yn=EXCLUDED.accessible_room_yn, eval_info_raw=EXCLUDED.eval_info_raw,"
+        " estb_date=EXCLUDED.estb_date,"
+        # 기구표에서 나오는 플래그 8종과 원문은 "새 값이 NULL 이면 기존 값 유지"로 갱신한다.
+        #   새 값이 NULL 이 되는 경우: (1) 기구표 조회를 끈 실행(KOWSI_FETCH_EVAL=OFF — 전 플래그 None)
+        #   (2) 기구표 호출 실패 (3) 원천이 더미 응답을 준 경우 (4) 해당 없음으로 판정을 보류한 항목.
+        #   EXCLUDED 값으로 그대로 덮으면 이런 실행 한 번으로 이전에 수집해 둔 Y/N 과 원문이 NULL 이 된다.
+        #   새 값이 있으면(Y/N, 원문 문자열) 그 값으로 갱신된다.
+        #   테이블명을 붙여(poi_facility_accessibility.x) 기존 행의 값을 가리킨다.
+        " elevator_yn=COALESCE(EXCLUDED.elevator_yn, poi_facility_accessibility.elevator_yn),"
+        " dis_toilet_yn=COALESCE(EXCLUDED.dis_toilet_yn, poi_facility_accessibility.dis_toilet_yn),"
+        " dis_parking_yn=COALESCE(EXCLUDED.dis_parking_yn, poi_facility_accessibility.dis_parking_yn),"
+        " entrance_ramp_yn=COALESCE(EXCLUDED.entrance_ramp_yn, poi_facility_accessibility.entrance_ramp_yn),"
+        " entrance_door_yn=COALESCE(EXCLUDED.entrance_door_yn, poi_facility_accessibility.entrance_door_yn),"
+        " approach_road_yn=COALESCE(EXCLUDED.approach_road_yn, poi_facility_accessibility.approach_road_yn),"
+        " guide_facility_yn=COALESCE(EXCLUDED.guide_facility_yn, poi_facility_accessibility.guide_facility_yn),"
+        " accessible_room_yn=COALESCE(EXCLUDED.accessible_room_yn, poi_facility_accessibility.accessible_room_yn),"
+        " eval_info_raw=COALESCE(EXCLUDED.eval_info_raw, poi_facility_accessibility.eval_info_raw),"
         " base_dt=EXCLUDED.base_dt, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
     )
     return _execute_batch(sql, rows)

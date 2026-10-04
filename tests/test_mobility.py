@@ -347,18 +347,86 @@ class KowsiChunkedScanTests(unittest.TestCase):
             c = self._collector(tmp, max_pages=2, pages=pages)
             rows = c.collect()
             self.assertEqual([r['facl_inf_id'] for r in rows], ['1', '4'])
+            # 진행 상태는 적재 성공 뒤 commit_state() 가 파일에 쓴다(collect 만으로는 전진하지 않는다)
+            self.assertTrue(c.commit_state())
             state = json.load(open(os.path.join(tmp, 'state.json'), encoding='utf-8'))
             self.assertEqual(state['next_page'], 3)
             self.assertIsNone(state['cycle_completed_at'])
             # 2회차: p3 스캔 후 완주 처리
             rows2 = c.collect()
             self.assertEqual(rows2, [])
+            self.assertTrue(c.commit_state())
             state = json.load(open(os.path.join(tmp, 'state.json'), encoding='utf-8'))
             self.assertEqual(state['next_page'], 1)
             self.assertIsNotNone(state['cycle_completed_at'])
             # 3회차: 재스캔 주기 미도래 -> skip
             rows3 = c.collect()
             self.assertEqual(rows3, [])
+            self.assertFalse(c.commit_state())      # 저장할 상태가 없다
+
+    def test_collect_alone_does_not_advance_state(self):
+        """collect() 만 하고 적재를 확정하지 않으면 다음 실행이 같은 구간을 다시 스캔한다."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            total = 6
+            pages = [
+                self._page_xml(total, [('1', 'A', '경기도 안양시 1'), ('2', 'B', '서울')]),
+                self._page_xml(total, [('3', 'C', '부산'), ('4', 'D', '경기도 안양시 2')]),
+                self._page_xml(total, [('5', 'E', '대구'), ('6', 'F', '인천')]),
+            ]
+            c = self._collector(tmp, max_pages=2, pages=pages)
+            first = c.collect()
+            self.assertFalse(os.path.exists(os.path.join(tmp, 'state.json')))
+            again = c.collect()
+            self.assertEqual([r['facl_inf_id'] for r in again], [r['facl_inf_id'] for r in first])
+
+    def _run_pipeline(self, tmp, mode, upsert):
+        """run_mobility 를 DB·네트워크 없이 실행한다(수집기는 가짜 페이지, 적재는 upsert 대역)."""
+        import mobility_pipeline
+        from unittest.mock import patch
+        total = 6
+        pages = [
+            self._page_xml(total, [('1', 'A', '경기도 안양시 1'), ('2', 'B', '서울')]),
+            self._page_xml(total, [('3', 'C', '부산'), ('4', 'D', '경기도 안양시 2')]),
+            self._page_xml(total, [('5', 'E', '대구'), ('6', 'F', '인천')]),
+        ]
+        collector = self._collector(tmp, max_pages=2, pages=pages)
+        cwd = os.getcwd()
+        os.chdir(tmp)       # 원본 보존 파일(ext_data/...)이 임시 폴더에 만들어지게 한다
+        try:
+            with patch.dict(mobility_pipeline.MOBILITY_COLLECTORS,
+                            {'KOWSI_FACL': lambda api_info, stats_src: collector}), \
+                    patch.dict(mobility_pipeline._UPSERT_DISPATCH, {'KOWSI_FACL': upsert}), \
+                    patch.object(mobility_pipeline, 'get_api_info', return_value={}), \
+                    patch.object(mobility_pipeline.db_mobility, 'touch_latest_sync'):
+                return mobility_pipeline.run_mobility('KOWSI_FACL', mode)
+        finally:
+            os.chdir(cwd)
+
+    def test_pipeline_keeps_state_when_db_load_fails(self):
+        import tempfile
+
+        def failing_upsert(rows):
+            raise RuntimeError('DB 적재 실패')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError):
+                self._run_pipeline(tmp, 'db', failing_upsert)
+            self.assertFalse(os.path.exists(os.path.join(tmp, 'state.json')))
+
+    def test_pipeline_advances_state_after_db_load(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self._run_pipeline(tmp, 'db', lambda rows: len(rows))
+            self.assertEqual(summary['db_ok'], 2)
+            state = json.load(open(os.path.join(tmp, 'state.json'), encoding='utf-8'))
+            self.assertEqual(state['next_page'], 3)
+
+    def test_pipeline_file_mode_does_not_advance_state(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run_pipeline(tmp, 'file', lambda rows: self.fail('file 모드에서는 적재하지 않는다'))
+            self.assertFalse(os.path.exists(os.path.join(tmp, 'state.json')))
 
 
 class TourBfFlagTests(unittest.TestCase):
