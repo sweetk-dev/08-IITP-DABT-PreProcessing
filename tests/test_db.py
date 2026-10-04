@@ -9,9 +9,8 @@ DB 접속 없이 mock 으로 SQL 바인딩 파라미터·반환값 형태만 검
 """
 import os
 import sys
-import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # 테스트 실행을 위한 환경: 모듈 import 시 외부 DB 접속을 시도하지 않도록
 # config.py / dotenv 가 로컬 .env 없이도 안전하게 동작함을 가정한다.

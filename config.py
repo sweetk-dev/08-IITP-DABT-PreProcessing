@@ -12,16 +12,12 @@ _DB_BATCH_SIZE = int(os.getenv('DB_BATCH_SIZE', '100'))
 # --- 로깅 설정 ---
 _LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 
-# --- KOSIS API 설정 ---
-_EXT_API_INFO_KOSIS_SYS = os.getenv('EXT_API_INFO_KOSIS_SYS', 'KOSIS')
-
 # --- 병렬처리 성능 설정 ---
 _PARALLEL_WORKERS_FILE = int(os.getenv('PARALLEL_WORKERS_FILE', '4'))
 _PARALLEL_WORKERS_DB = int(os.getenv('PARALLEL_WORKERS_DB', '2'))
 
 # --- 데이터 수집 옵션 ---
 _DATA_COLLECTION_SCOPE = os.getenv('DATA_COLLECTION_SCOPE', 'ALL').upper()
-_CHECK_DATA_LATEST_DATE_MODE = os.getenv('CHECK_DATA_LATEST_DATE_MODE', 'OFF').upper()
 
 
 def get_db_url():
@@ -33,25 +29,8 @@ def get_log_level():
 def get_db_batch_size():
     return _DB_BATCH_SIZE
 
-def get_kosis_sys():
-    return _EXT_API_INFO_KOSIS_SYS
-
 def get_data_collection_scope():
     return _DATA_COLLECTION_SCOPE
-
-def get_check_data_latest_date_mode():
-    """
-    KOSIS 최신 변경일 기준 업데이트 여부 체크 모드를 반환합니다.
-
-    반환값:
-        - 'ON' : KOSIS 최종 변경일이 내부 기록보다 최신인 경우에만 DB 업데이트
-        - 'OFF': 항상 DB 업데이트 (기본값)
-
-    .env 설정 키: CHECK_DATA_LATEST_DATE_MODE=ON 또는 OFF
-    사용 위치: db_processing.py process_single_statistic() (구현 예정)
-    """
-    return _CHECK_DATA_LATEST_DATE_MODE
-
 
 def get_parallel_workers_file():
     return min(_PARALLEL_WORKERS_FILE, 10)

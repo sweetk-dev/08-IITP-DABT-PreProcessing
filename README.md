@@ -142,11 +142,9 @@ cp .env.example .env
 | `DB_URL` | ✅ | — | `postgresql://...` | PostgreSQL 접속 URL |
 | `DB_BATCH_SIZE` | — | `100` | 정수 | DB 배치 삽입 크기 |
 | `LOG_LEVEL` | — | `INFO` | `DEBUG` `INFO` `WARNING` `ERROR` | 로그 출력 레벨 |
-| `EXT_API_INFO_KOSIS_SYS` | — | `KOSIS` | 문자열 | KOSIS 시스템 구분 코드 |
 | `PARALLEL_WORKERS_FILE` | — | `4` | 정수 | 파일 저장 병렬 워커 수 |
 | `PARALLEL_WORKERS_DB` | — | `2` | 정수 | DB 삽입 병렬 워커 수 |
 | `DATA_COLLECTION_SCOPE` | — | `ALL` | `ALL` `PARTIAL` | 데이터 수집 범위 |
-| `CHECK_DATA_LATEST_DATE_MODE` | — | `OFF` | `ON` `OFF` | KOSIS 최신 변경일 기준 업데이트 여부 |
 ### 빠른 시작 예시
 
 ```env
