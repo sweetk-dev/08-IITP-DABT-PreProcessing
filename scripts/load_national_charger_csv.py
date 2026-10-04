@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import datetime
 import io
 import os
 import sys
@@ -157,8 +156,6 @@ def map_row(src):
         'confidence': 'H',
         'base_dt': _clean(src.get('데이터기준일자')),
         '_sido': sido,
-        '_desc': _clean(src.get('설치장소설명')),
-        '_count': _to_float(src.get('동시사용가능대수')) or 0,
     }
 
 
@@ -261,8 +258,6 @@ def build(path, sidos):
     rows, duped = dedupe_exact(rows)
     for row in rows:
         row.pop('_sido', None)
-        row.pop('_desc', None)
-        row.pop('_count', None)
     flagged = mark_suspect_coords(rows)
     print('원본 %d행 → 적재 대상 %d건 (범위 밖 제외 %d, 완전중복 제거 %d)'
           % (len(raw), len(rows), skipped, duped))
