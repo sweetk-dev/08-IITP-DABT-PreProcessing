@@ -34,6 +34,46 @@ class KosisApiError(RuntimeError):
         )
 
 
+class KosisHttpStatusError(RuntimeError):
+    """KOSIS 가 200 이 아닌 HTTP 상태 코드를 돌려줬을 때 내부에서 올리는 예외.
+
+    요청 함수의 바깥 except 가 이 예외를 받아 상태 코드를 사유에 옮긴다(_abort_error 참고).
+    RuntimeError 의 하위 클래스이므로 RuntimeError 를 잡는 기존 호출자는 그대로 동작한다.
+
+    속성:
+        status_code: HTTP 상태 코드(int).
+    메시지에는 상태 코드만 담는다. 요청 URL 과 인증키는 담지 않는다.
+    """
+
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__(f"KOSIS API 요청 실패: HTTP {status_code}")
+
+
+def _abort_error(kind, exc):
+    """요청 실패를 상위로 올릴 RuntimeError 를 만든다(사유에 HTTP 상태 코드·예외 종류 포함).
+
+    문구가 "KOSIS API 처리 중단" 뿐이면 실행 요약(run_summary.log)의 실패 사유만으로는
+    인증키 만료(4xx)·원천 장애(5xx)·네트워크 단절(ConnectionError)·시간 초과(Timeout)를
+    구분할 수 없다. 사유에 "HTTP <상태 코드>" 또는 예외 클래스 이름을 덧붙인다.
+
+    예외 문자열(str(exc))은 싣지 않는다 — requests 예외 문자열에는 요청 URL(apiKey 포함)이
+    들어 있다. 상태 코드와 클래스 이름에는 URL·인증키가 포함되지 않는다.
+
+    인자:
+        kind: 호출 종류('data' / 'meta' / 'latest').
+        exc: 요청 중 잡힌 예외. KosisHttpStatusError 면 상태 코드를, 그 외에는 클래스 이름을 쓴다.
+    반환:
+        RuntimeError — 메시지 예: ``KOSIS API 처리 중단(latest): HTTP 503`` /
+        ``KOSIS API 처리 중단(data): ConnectionError``. 호출자가 ``raise ... from None`` 으로 올린다.
+    """
+    if isinstance(exc, KosisHttpStatusError):
+        detail = f"HTTP {exc.status_code}"
+    else:
+        detail = type(exc).__name__
+    return RuntimeError(f"KOSIS API 처리 중단({kind}): {detail}")
+
+
 # 기간이 너무 넓어 건수 제한을 넘었을 때의 코드. 이 코드만 "기간을 나눠 다시 호출"로 처리한다.
 KOSIS_ERR_PERIOD_TOO_WIDE = '31'
 
@@ -118,7 +158,7 @@ def fetch_kosis_data_single(api_info, stats_src, stats_src_data_info, from_year,
         if response.status_code != 200:
             logging.error(f'KOSIS data API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}, response={response.text[:200]}')
             print(f"[ERROR] KOSIS data API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}")
-            raise RuntimeError("KOSIS API 요청 실패")
+            raise KosisHttpStatusError(response.status_code)
     except Exception as e:
         # requests 예외 문자열에는 요청 URL(apiKey 포함)이 들어 있다. 그대로 로그에 쓰거나
         # exc_info=True 로 트레이스백을 남기면 인증키가 로그 파일에 기록되므로
@@ -127,7 +167,8 @@ def fetch_kosis_data_single(api_info, stats_src, stats_src_data_info, from_year,
         safe_msg = f"{type(e).__name__}: {mask_auth_in_url(str(e))}"
         logging.error(f'KOSIS data API 요청 중 예외 발생: {safe_msg}')
         print(f"[ERROR] KOSIS data API 요청 중 예외 발생: {safe_msg}")
-        raise RuntimeError("KOSIS API 처리 중단") from None
+        # 상위로 올리는 사유에는 HTTP 상태 코드 또는 예외 종류만 싣는다(URL·인증키 제외).
+        raise _abort_error('data', e) from None
     
     if file_format == 'json':
         data = response.json()
@@ -180,7 +221,8 @@ def fetch_kosis_data_split(api_info, stats_src, stats_src_data_info, from_year, 
     if is_error_31(response):
         logging.error(f"Error 31: 1년 단위({from_year}~{to_year})에서도 데이터 수집 실패")
         print(f"[ERROR] KOSIS API Error 31: 1년 단위({from_year}~{to_year})에서도 데이터 수집 실패")
-        raise RuntimeError("KOSIS API 처리 중단")
+        # 요약 로그의 실패 사유로 그대로 쓰이므로 원인(err=31, 더 나눌 수 없는 1년 구간)을 문구에 담는다.
+        raise RuntimeError(f"KOSIS API 처리 중단(data): err=31, 1년 단위({from_year}~{to_year})에서도 건수 초과")
     
     return response if isinstance(response, list) else [response]
 
@@ -211,7 +253,7 @@ def fetch_kosis_meta(api_info, stats_src, stats_src_data_info):
         if response.status_code != 200:
             logging.error(f'KOSIS meta API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}, response={response.text[:200]}')
             print(f"[ERROR] KOSIS meta API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}")
-            raise RuntimeError("KOSIS API 요청 실패")
+            raise KosisHttpStatusError(response.status_code)
     except Exception as e:
         # requests 예외 문자열에는 요청 URL(apiKey 포함)이 들어 있다. 그대로 로그에 쓰거나
         # exc_info=True 로 트레이스백을 남기면 인증키가 로그 파일에 기록되므로
@@ -220,7 +262,8 @@ def fetch_kosis_meta(api_info, stats_src, stats_src_data_info):
         safe_msg = f"{type(e).__name__}: {mask_auth_in_url(str(e))}"
         logging.error(f'KOSIS meta API 요청 중 예외 발생: {safe_msg}')
         print(f"[ERROR] KOSIS meta API 요청 중 예외 발생: {safe_msg}")
-        raise RuntimeError("KOSIS API 처리 중단") from None
+        # 상위로 올리는 사유에는 HTTP 상태 코드 또는 예외 종류만 싣는다(URL·인증키 제외).
+        raise _abort_error('meta', e) from None
     if file_format == 'json':
         result = response.json()
         # meta 호출도 오류를 HTTP 200 + {"err": ...} 로 돌려준다. 정상 응답으로 저장하면
@@ -240,7 +283,7 @@ def fetch_kosis_latest(api_info, stats_src, stats_src_data_info):
         if response.status_code != 200:
             logging.error(f'KOSIS latest API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}, response={response.text[:200]}')
             print(f"[ERROR] KOSIS latest API 요청 실패: status={response.status_code}, url={mask_auth_in_url(url)}")
-            raise RuntimeError("KOSIS API 요청 실패")
+            raise KosisHttpStatusError(response.status_code)
     except Exception as e:
         # requests 예외 문자열에는 요청 URL(apiKey 포함)이 들어 있다. 그대로 로그에 쓰거나
         # exc_info=True 로 트레이스백을 남기면 인증키가 로그 파일에 기록되므로
@@ -249,7 +292,8 @@ def fetch_kosis_latest(api_info, stats_src, stats_src_data_info):
         safe_msg = f"{type(e).__name__}: {mask_auth_in_url(str(e))}"
         logging.error(f'KOSIS latest API 요청 중 예외 발생: {safe_msg}')
         print(f"[ERROR] KOSIS latest API 요청 중 예외 발생: {safe_msg}")
-        raise RuntimeError("KOSIS API 처리 중단") from None
+        # 상위로 올리는 사유에는 HTTP 상태 코드 또는 예외 종류만 싣는다(URL·인증키 제외).
+        raise _abort_error('latest', e) from None
     if file_format == 'json':
         result = response.json()
         # latest 호출도 오류를 HTTP 200 + {"err": ...} 로 돌려준다. 정상 응답으로 저장하면

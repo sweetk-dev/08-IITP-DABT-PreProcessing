@@ -6,7 +6,7 @@
    적재 전 응답 검증 함수(validate_kosis_data_response)의 판정만 본다.
 
 2. ``KosisLoadDbTests`` — 실제 PostgreSQL 이 있을 때만 돈다.
-   ITEST_DB_URL(또는 DB_URL) 이 설정돼 있지 않으면 건너뛴다.
+   ITEST_DB_URL 이 설정돼 있지 않으면 건너뛴다(DB_URL 만 있는 환경에서는 실행하지 않는다).
    01-IITP-DABT-Database 의 basic init 스크립트가 적용된 DB 가 필요하다.
 
    운영 테이블의 기존 행은 건드리지 않는다:
@@ -23,16 +23,21 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import db_processing  # noqa: E402
-from db_processing import validate_kosis_data_response  # noqa: E402
+from db_processing import KosisDataValidationError, validate_kosis_data_response  # noqa: E402
 
-ITEST_URL = os.getenv('ITEST_DB_URL') or os.getenv('DB_URL')
+# 통합 테스트 대상 DB 는 ITEST_DB_URL 로만 정한다(DB_URL 로 대신하지 않는다).
+# config.py / db.py 는 임포트 시점에 .env 를 읽어 DB_URL 을 환경변수로 올린다. DB_URL 을
+# 대신 쓰면 .env 가 있는 배포 폴더에서 테스트를 돌렸을 때 배치가 쓰는 DB 에서
+# 통합 테스트(테스트 테이블 생성·삭제, 표식 행 삽입·삭제)가 실행된다.
+# 빈 문자열도 "미설정"으로 본다.
+ITEST_URL = os.getenv('ITEST_DB_URL') or None
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +97,107 @@ class ValidateKosisDataResponseTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 1-1. 단위 테스트 — 갱신일(SendDe) 확인과 meta 오류 본문 판별 (DB 불필요)
+# ---------------------------------------------------------------------------
+class LatestDateRequiredTests(unittest.TestCase):
+    """갱신일을 얻지 못한 통계는 DB 에 쓰기 전에 명시적 사유로 실패한다.
+
+    DB 세션은 MagicMock 으로 대신한다 — 실패 시 session.execute 가 한 번도 호출되지 않아야
+    "기존 데이터에 손대지 않았다"가 성립한다.
+    """
+
+    VALID_ROWS = [{'PRD_DE': '2023', 'DT': '1', 'TBL_ID': 'DT_X', 'C1': 'A', 'ITM_ID': 'T1'}]
+    META_XML = ('<Structures><MetaRow><objId>ITEM</objId><itmId>T1</itmId><objIdSn>1</objIdSn>'
+                '</MetaRow></Structures>')
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='utest_kosis_')
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, name, body):
+        path = os.path.join(self.tmp, name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(body)
+        return path
+
+    def _file_info(self, latest_name, latest_body, meta_body=None):
+        return {
+            'stat_tbl_id': 'DT_X', 'src_data_id': 1, 'ext_api_id': 1, 'stat_api_id': 1,
+            'latest_path': self._write(latest_name, latest_body),
+            'data_path': self._write('data.json', json.dumps(self.VALID_ROWS)),
+            'meta_path': self._write('meta.xml', meta_body if meta_body is not None else self.META_XML),
+        }
+
+    def _assert_rejected_before_any_sql(self, file_info, *expected):
+        session = MagicMock()
+        with self.assertRaises(KosisDataValidationError) as cm:
+            db_processing.process_single_statistic(
+                session, file_info, {'ext_api_id': 1}, {'stat_tbl_id': 'DT_X'},
+                {'intg_tbl_id': 'stats_x', 'src_data_id': 1})
+        session.execute.assert_not_called()
+        for text in expected:
+            self.assertIn(text, str(cm.exception))
+
+    # --- latest: JSON 형식 ---
+    def test_json_latest_without_send_de_is_rejected(self):
+        for body in ('[]', '[{"TBL_ID": "DT_X"}]', '{}', '[{"SendDe": ""}]'):
+            with self.subTest(body=body):
+                self._assert_rejected_before_any_sql(
+                    self._file_info('latest.json', body), '갱신일을 확인하지 못함', '기존 데이터 유지')
+
+    def test_json_latest_error_dict_reason_has_code(self):
+        self._assert_rejected_before_any_sql(
+            self._file_info('latest.json', json.dumps({'err': '20', 'errMsg': '필수요청변수값이 누락되었습니다.'})),
+            '갱신일을 확인하지 못함', 'err=20')
+
+    # --- latest: text(XML) 형식 ---
+    def test_xml_latest_without_send_de_element_is_rejected(self):
+        self._assert_rejected_before_any_sql(
+            self._file_info('latest.xml', '<Structures><MetaRow><tblId>DT_X</tblId></MetaRow></Structures>'),
+            '갱신일을 확인하지 못함', 'SendDe 없음')
+
+    def test_xml_latest_error_elements_are_named_in_reason(self):
+        self._assert_rejected_before_any_sql(
+            self._file_info('latest.xml', '<error><err>30</err><errMsg>데이터가 존재하지 않습니다.</errMsg></error>'),
+            '갱신일을 확인하지 못함', 'err=30', '데이터가 존재하지 않습니다.')
+
+    def test_xml_latest_holding_json_error_text_is_rejected_with_code(self):
+        """형식이 XML 로 설정된 통계에 JSON 오류 본문이 저장된 경우 — XML 해석 예외가 아니라 사유가 남는다."""
+        self._assert_rejected_before_any_sql(
+            self._file_info('latest.xml', '{"err":"11","errMsg":"유효하지 않은 인증키입니다."}'),
+            '갱신일을 확인하지 못함', 'err=11')
+
+    def test_xml_latest_unparsable_body_is_rejected(self):
+        self._assert_rejected_before_any_sql(
+            self._file_info('latest.xml', '서비스 점검 중입니다'), '갱신일을 확인하지 못함', '해석할 수 없음')
+
+    def test_latest_with_send_de_passes_this_check(self):
+        """갱신일이 있으면 이 검사에서 걸리지 않고 적재 단계로 넘어간다(JSON·XML 모두)."""
+        cases = (('latest.json', '[{"SendDe": "2025-03-06"}, {"SendDe": "2024-01-01"}]'),
+                 ('latest.xml', '<S><MetaRow><SendDe>2025-03-06</SendDe></MetaRow></S>'))
+        for name, body in cases:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    db_processing._require_latest_date(self._write(name, body), 'DT_X'), '2025-03-06')
+
+    # --- meta: text 형식에 저장된 오류 본문 ---
+    def test_meta_json_error_text_is_rejected_before_any_sql(self):
+        self._assert_rejected_before_any_sql(
+            self._file_info('latest.json', '[{"SendDe": "2025-03-06"}]',
+                            meta_body='{"err":"20","errMsg":"필수요청변수값이 누락되었습니다."}'),
+            'meta 응답이 오류 본문', 'err=20')
+
+    def test_describe_error_body_ignores_normal_bodies(self):
+        for body in (None, '', self.META_XML, '[{"SendDe": "2025-03-06"}]', '{"SendDe": "2025-03-06"}',
+                     'XML 이 아닌 본문'):
+            with self.subTest(body=body):
+                self.assertIsNone(db_processing._describe_error_body(body))
+
+
+# ---------------------------------------------------------------------------
 # 2. 통합 테스트 — 실제 PostgreSQL
 # ---------------------------------------------------------------------------
 INTG_A = 'stats_itest_intg_a'
@@ -132,7 +238,7 @@ def _rows(stat_tbl_id, years=(2021, 2022, 2023), cats=('A1', 'A2'), dt='10'):
     return out
 
 
-@unittest.skipUnless(ITEST_URL, 'ITEST_DB_URL/DB_URL 미설정 — DB 통합 테스트 생략')
+@unittest.skipUnless(ITEST_URL, 'ITEST_DB_URL 미설정 — DB 통합 테스트 생략')
 class KosisLoadDbTests(unittest.TestCase):
 
     @classmethod
@@ -342,7 +448,12 @@ class KosisLoadDbTests(unittest.TestCase):
         self.assertIsNotNone(self._sync_time())
 
     # --- (2)(3) 오류·빈 응답 → 기존 행 보존 + 실패 집계 ----------------------
-    def _assert_rejected_and_preserved(self, bad_response, expect_in_reason):
+    def _assert_rejected_and_preserved(self, bad_response, expect_in_reason, **file_kwargs):
+        """bad_response: ITEST_DT_A 의 data 응답. file_kwargs: latest/meta 파일 내용 지정(_file_info 참고).
+
+        file_kwargs 는 이 실행의 두 통계(A·B) 모두에 적용된다. 그래서 file_kwargs 를 준 경우에는
+        "다른 통계는 정상 적재" 확인을 하지 않고, A 의 실패 사유·기존 행 보존만 본다.
+        """
         rows = _rows('ITEST_DT_A')
         self._run({'ITEST_DT_A': rows})
         self._age_rows('ITEST_DT_A')
@@ -354,12 +465,16 @@ class KosisLoadDbTests(unittest.TestCase):
                 "UPDATE sys_ext_api_info SET latest_sync_time = NULL WHERE ext_api_id = :e"),
                 {'e': self.ext_api_id})
 
-        result = self._run({'ITEST_DT_A': bad_response, 'ITEST_DT_B': _rows('ITEST_DT_B')})
+        if file_kwargs:
+            result = self._run({'ITEST_DT_A': bad_response}, **file_kwargs)
+        else:
+            result = self._run({'ITEST_DT_A': bad_response, 'ITEST_DT_B': _rows('ITEST_DT_B')})
 
         # 실패 집계 + 사유
         self.assertEqual([f[0] for f in result['failed']], ['ITEST_DT_A'])
         self.assertIn(expect_in_reason, result['failed'][0][1])
-        self.assertEqual(result['succeeded'], ['ITEST_DT_B'])
+        if not file_kwargs:
+            self.assertEqual(result['succeeded'], ['ITEST_DT_B'])
         # 기존 행 보존 — 통합·원본 모두 그대로, 오류 응답은 원본에도 들어가지 않는다
         self.assertEqual(self._count(INTG_A, 'ITEST_DT_A'), len(rows))
         self.assertEqual(self._count('stats_kosis_origin_data', 'ITEST_DT_A'), len(rows))
@@ -371,6 +486,8 @@ class KosisLoadDbTests(unittest.TestCase):
         # 성공 표시 미갱신 — 실패한 통계의 동기화 시각, 시스템 전체 동기화 시각
         self.assertIsNone(self._sync_time('ITEST_DT_A'))
         self.assertIsNone(self._sync_time())
+        if file_kwargs:
+            return
         # 다른 통계는 정상 적재
         self.assertEqual(self._count(INTG_B, 'ITEST_DT_B'), len(_rows('ITEST_DT_B')))
         self.assertIsNotNone(self._sync_time('ITEST_DT_B'))
@@ -384,6 +501,10 @@ class KosisLoadDbTests(unittest.TestCase):
 
     def test_response_without_numeric_period_preserves_existing_rows(self):
         self._assert_rejected_and_preserved([{'PRD_DE': '', 'DT': '1', 'C1': 'A'}], '숫자 PRD_DE')
+
+    def test_missing_update_date_is_rejected_with_explicit_reason(self):
+        """latest 응답에 SendDe 가 없으면 DB 제약 위반 문구가 아니라 명시적 사유로 실패한다."""
+        self._assert_rejected_and_preserved(_rows('ITEST_DT_A'), '갱신일을 확인하지 못함', latest=None)
 
     def test_failure_after_load_rolls_back_whole_statistic(self):
         """원본 교체·통합 교체 뒤 단계(메타 적재)가 실패하면 그 통계의 변경은 전부 되돌려진다."""

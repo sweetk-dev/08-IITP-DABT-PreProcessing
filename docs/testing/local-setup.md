@@ -183,6 +183,18 @@ Ran N tests in 0.XXXs
 OK
 ```
 
+### DB 통합 테스트 (선택)
+
+실제 PostgreSQL 에 쓰는 통합 테스트(`test_db_processing` / `test_mobility_db` / `test_gg_toilet_db`)는 **`ITEST_DB_URL` 환경변수가 있을 때만** 실행되고, 없으면 건너뜁니다(skipped). `.env` 의 `DB_URL` 만 있는 상태에서는 실행되지 않습니다.
+
+- 통합 테스트는 대상 DB 에 테스트 전용 테이블을 만들고 지우며, 표식(`ITEST`)을 단 행을 넣고 지웁니다. **운영 DB 주소를 `ITEST_DB_URL` 에 넣지 마세요.** 01-IITP-DABT-Database 의 init 스크립트를 적용한 테스트 전용 DB 를 지정합니다.
+- `ITEST_DB_URL` 은 `.env` 에 넣지 말고 실행할 때만 지정합니다.
+
+```bash
+ITEST_DB_URL='postgresql://<USER>:<PASSWORD>@127.0.0.1:5432/<TEST_DB>' \
+  python -m unittest discover -s tests -v 2>&1 | tail -10
+```
+
 ---
 
 ## 6. 1차 검증 — `--mode file` (DB 조회 / KOSIS API / 파일 저장)

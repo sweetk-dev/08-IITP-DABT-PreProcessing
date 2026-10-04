@@ -309,6 +309,50 @@ class CollectIsolationTests(unittest.TestCase):
         self.assertIn('빈 리스트', summary['error'])
         self.assertIn('collect_fail:DT_BAD(', summary['error'])
 
+    # --- 수집 전부 실패 → 치명적 오류(종료 코드 1) ---------------------------
+    @staticmethod
+    def _fake_save_all_fail(args):
+        """모든 통계의 수집이 실패하는 상황(인증키 만료·원천 전체 장애) — 실제 예외 모양을 따른다."""
+        _api_info, stats_src, _dirs, _data_info = args
+        stat_tbl_id = stats_src['stat_tbl_id']
+        try:
+            raise RuntimeError('KOSIS API 처리 중단(meta): HTTP 503')
+        except RuntimeError as cause:
+            raise RuntimeError('[%s] save_single_file - 파일 저장 실패' % stat_tbl_id) from cause
+
+    def _run_main_all_fail(self, mode):
+        # 클래스 속성을 바꿔 끼우므로 staticmethod 로 감싼다(감싸지 않으면 self 가 첫 인자로 넘어간다).
+        with patch.object(CollectIsolationTests, '_fake_save_single_file',
+                          staticmethod(CollectIsolationTests._fake_save_all_fail)):
+            return self._run_main(mode)
+
+    def test_file_mode_exit_code_is_1_when_every_statistic_fails(self):
+        code, summary, db_calls = self._run_main_all_fail('file')
+        self.assertEqual(code, 1)
+        self.assertEqual(summary['status'], 'ERROR')
+        self.assertEqual((summary['targets'], summary['files_ok']), (3, 0))
+        # 사유는 부분 완료 때와 같은 형식으로 남고, HTTP 상태 코드가 들어 있다
+        self.assertIn('collect_fail:', summary['error'])
+        self.assertIn('DT_OK1(', summary['error'])
+        self.assertIn('HTTP 503', summary['error'])
+        self.assertEqual(db_calls, [])
+
+    def test_db_mode_exit_code_is_1_when_every_statistic_fails(self):
+        code, summary, db_calls = self._run_main_all_fail('db')
+        self.assertEqual(code, 1)
+        self.assertEqual(summary['status'], 'ERROR')
+        self.assertEqual((summary['files_ok'], summary['db_ok'], summary['db_fail']), (0, 0, 0))
+        # 적재 단계에는 처리할 통계가 넘어가지 않는다(기존 데이터 유지)
+        self.assertEqual(db_calls[0]['saved'], [])
+        self.assertEqual(len(db_calls[0]['collect_failed']), 3)
+
+    def test_no_targets_is_not_treated_as_total_failure(self):
+        """대상이 0건이면 "전부 실패"가 아니다 — 종전처럼 정상 종료한다."""
+        with patch.object(CollectIsolationTests, 'STATS', []):
+            code, summary, _ = self._run_main('file')
+        self.assertEqual(code, 0)
+        self.assertEqual(summary['status'], 'SUCCESS')
+
 
 if __name__ == '__main__':
     unittest.main()

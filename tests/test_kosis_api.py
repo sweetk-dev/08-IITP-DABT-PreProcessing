@@ -156,5 +156,51 @@ class KosisAuthMaskingTests(unittest.TestCase):
         self.assertIsNone(kosis_api.mask_auth_in_url(None))
 
 
+class KosisFailureReasonTests(unittest.TestCase):
+    """요청 실패 예외의 문구에 HTTP 상태 코드·예외 종류가 들어간다(요약 로그의 실패 사유로 쓰인다).
+
+    문구가 "KOSIS API 처리 중단" 뿐이면 인증키 문제(4xx)·원천 장애(5xx)·네트워크 단절을
+    요약 로그만으로 구분할 수 없다. URL·인증키는 문구에 들어가지 않아야 한다.
+    """
+
+    FETCHES = (('data', 'fetch_kosis_data'), ('meta', 'fetch_kosis_meta'), ('latest', 'fetch_kosis_latest'))
+
+    def _message(self, fetch_name, side_effect=None, return_value=None):
+        with patch.object(kosis_api.requests, 'get', side_effect=side_effect, return_value=return_value), \
+                patch('builtins.print'), self.assertLogs(level=logging.ERROR):
+            with self.assertRaises(RuntimeError) as cm:
+                getattr(kosis_api, fetch_name)(API_INFO, STATS_SRC, DATA_INFO)
+        return str(cm.exception)
+
+    def test_http_status_code_is_in_reason(self):
+        for kind, fetch_name in self.FETCHES:
+            with self.subTest(kind=kind):
+                message = self._message(fetch_name, return_value=_Resp({'message': 'unavailable'}, status_code=503))
+                self.assertIn('HTTP 503', message)
+                self.assertIn(kind, message)
+                self.assertNotIn(SECRET, message)
+                self.assertNotIn('kosis.example', message)
+
+    def test_exception_type_is_in_reason(self):
+        def timeout(url, timeout=None):
+            raise requests.exceptions.ReadTimeout('timed out: ' + url)
+
+        for kind, fetch_name in self.FETCHES:
+            with self.subTest(kind=kind):
+                message = self._message(fetch_name, side_effect=timeout)
+                self.assertIn('ReadTimeout', message)
+                self.assertIn(kind, message)
+                self.assertNotIn(SECRET, message)
+                self.assertNotIn('kosis.example', message)
+
+    def test_err_31_at_one_year_range_reason_names_the_error(self):
+        data_info = {'collect_start_dt': '2023', 'collect_end_dt': '2023'}
+        with patch.object(kosis_api.requests, 'get', return_value=_Resp({'err': '31', 'errMsg': '건수 초과'})), \
+                patch('builtins.print'):
+            with self.assertRaises(RuntimeError) as cm:
+                kosis_api.fetch_kosis_data(API_INFO, STATS_SRC, data_info)
+        self.assertIn('err=31', str(cm.exception))
+
+
 if __name__ == '__main__':
     unittest.main()

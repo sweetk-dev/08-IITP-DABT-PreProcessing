@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # preserved: with ext_sys defaulting to 'KOSIS', the legacy save path and the
 # collector behavior are identical to v1.4.0.
 # ============================================================================
-__version__ = "1.16.1"
+__version__ = "1.16.4"
 
 
 
@@ -458,7 +458,22 @@ def main():
 
             # 종료 코드 규약: 0 성공 / 2 일부 통계 실패(부분 완료) / 1 치명적 오류.
             # 수집 실패도 적재 실패와 같이 "일부 통계 실패"로 본다 — 실패가 1건이라도 있으면 0 이 아니다.
-            if collect_failed or failed:
+            #
+            # 대상이 1건 이상인데 수집 성공이 0건이면 "부분 완료"가 아니라 치명적 오류(1)다.
+            # 인증키 만료·원천 전체 장애·네트워크 단절처럼 통계 개별 문제가 아닌 원인으로
+            # 전 통계가 실패한 상황인데, 이를 PARTIAL(2)로 내면 스케줄러·모니터링이
+            # "일부만 빠진 정상 실행"으로 읽는다. 이때 DB 는 어떤 통계도 바뀌지 않았다
+            # (saved_files_info 가 비어 있어 적재 단계가 처리할 대상이 없다).
+            # 실패 사유(통계별 HTTP 상태 코드·예외 종류)는 PARTIAL 과 같은 형식으로 error 에 남긴다.
+            if summary['targets'] > 0 and summary['files_ok'] == 0:
+                summary['status'] = 'ERROR'
+                summary['error'] = ";".join(error_parts)
+                exit_code = 1
+                logging.error(
+                    "수집 전부 실패 — 치명적 오류(종료코드 1). 대상 %d건, 수집 성공 0건.",
+                    summary['targets'],
+                )
+            elif collect_failed or failed:
                 summary['status'] = 'PARTIAL'
                 summary['error'] = ";".join(error_parts)
                 exit_code = 2
