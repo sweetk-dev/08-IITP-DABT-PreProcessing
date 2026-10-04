@@ -1,6 +1,6 @@
 """이동편의 적재기 통합 테스트 — 실제 PostgreSQL 이 있을 때만 돈다.
 
-ITEST_DB_URL(또는 DB_URL) 이 설정된 환경에서, 01-IITP-DABT-Database 의 mobility init
+ITEST_DB_URL 이 설정된 환경에서만(DB_URL 만 있으면 건너뜀), 01-IITP-DABT-Database 의 mobility init
 스크립트가 적용된 DB 를 대상으로 한다. 원본 테이블의 기존 행은 건드리지 않는다:
 'ITEST-' 로 시작하는 전용 키의 행만 넣고, 끝나면 그 행만 지운다.
 """
@@ -14,7 +14,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-ITEST_URL = os.getenv('ITEST_DB_URL') or os.getenv('DB_URL')
+# 통합 테스트 대상 DB 는 ITEST_DB_URL 로만 정한다(DB_URL 로 대신하지 않는다).
+# config.py / db.py 는 임포트 시점에 .env 를 읽어 DB_URL 을 환경변수로 올린다. DB_URL 을
+# 대신 쓰면 .env 가 있는 배포 폴더에서 테스트를 돌렸을 때 배치가 쓰는 DB 에서
+# 통합 테스트(테스트 테이블 생성·삭제, 표식 행 삽입·삭제)가 실행된다.
+# 빈 문자열도 "미설정"으로 본다.
+ITEST_URL = os.getenv('ITEST_DB_URL') or None
 
 FACL_ID = 'ITEST-FACL-0001'
 SUPPORT_NAME = 'ITEST-충전기-시청'
@@ -64,7 +69,7 @@ FLAG_COLS = ('elevator_yn', 'dis_toilet_yn', 'dis_parking_yn', 'entrance_ramp_yn
              'approach_road_yn', 'guide_facility_yn', 'accessible_room_yn', 'eval_info_raw')
 
 
-@unittest.skipUnless(ITEST_URL, 'ITEST_DB_URL/DB_URL 미설정 — DB 통합 테스트 생략')
+@unittest.skipUnless(ITEST_URL, 'ITEST_DB_URL 미설정 — DB 통합 테스트 생략')
 class UpsertFacilitiesDbTests(_DbCase):
     """기구표 플래그·원문은 새 값이 NULL 이면 기존 값을 유지하고, 값이 있으면 갱신한다."""
 
@@ -98,7 +103,7 @@ class UpsertFacilitiesDbTests(_DbCase):
         self.assertEqual(row['dis_parking_yn'], 'Y')      # 이번에 None 으로 온 항목은 유지
 
 
-@unittest.skipUnless(ITEST_URL, 'ITEST_DB_URL/DB_URL 미설정 — DB 통합 테스트 생략')
+@unittest.skipUnless(ITEST_URL, 'ITEST_DB_URL 미설정 — DB 통합 테스트 생략')
 class UpsertEmergencySupportDbTests(_DbCase):
     """poi_emergency_support 자연키(유형, 이름, 도로명주소, 설치지점)로 적재·재적재가 된다."""
 

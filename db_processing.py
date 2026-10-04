@@ -159,9 +159,25 @@ def process_single_statistic(session, file_info, api_info, stats_src, stats_data
     """
     logging.info(f"[{stats_src.get('stat_tbl_id')}] 단일 통계 처리 시작.")
     # 1. latest 파일 파싱 (최신 날짜 추출)
+    # 갱신일(SendDe)을 얻지 못하면 여기서 실패로 확정한다(_require_latest_date 참고).
+    # 이 시점에는 아직 아무 SQL 도 실행하지 않았으므로 기존 데이터가 그대로 남는다.
     latest_path = file_info['latest_path']
-    latest_date = _parse_latest_file_for_latest_date(latest_path)
+    latest_date = _require_latest_date(latest_path, file_info.get('stat_tbl_id'))
     logging.info(f"최신 SendDe 날짜 추출: {latest_date}")
+
+    # 1-1. meta 파일이 오류 본문인지 확인 — DB 에 쓰기 전에 끝낸다.
+    # meta 가 text(XML) 형식으로 설정된 통계는 수집 단계가 응답 본문을 그대로 파일에 쓴다
+    # (JSON 형식과 달리 오류 본문 판별을 거치지 않는다). 오류 본문이 저장된 채로 진행하면
+    # 5단계(메타 적재)에서 XML 해석 예외가 나고, 요약 로그에는 "XML 시작 태그를 찾을 수
+    # 없습니다" 같은 해석 오류만 남아 원천이 오류를 돌려줬다는 사실이 드러나지 않는다.
+    # 판별할 수 있는 형태({"err": ...} JSON 텍스트)만 여기서 걸러 사유에 오류 코드를 남긴다.
+    # 그 밖의 해석 불가 본문은 종전대로 5단계에서 실패하고 트랜잭션이 되돌려진다.
+    meta_error = _describe_error_body(_read_text_or_none(file_info.get('meta_path')))
+    if meta_error:
+        raise KosisDataValidationError(
+            f"[{file_info.get('stat_tbl_id')}] 적재 중단(기존 데이터 유지): "
+            f"meta 응답이 오류 본문 — {meta_error}"
+        )
 
     # 2. data 파일 파싱
     data_path = file_info['data_path']
@@ -202,6 +218,119 @@ def process_single_statistic(session, file_info, api_info, stats_src, stats_data
 
     # 8. 관리 테이블(sys_stats_src_api_info, sys_ext_api_info) 최신화
     _update_management_tables(session, file_info, api_info, stats_src, stats_data_info)
+
+# 오류 본문을 사유 문자열에 옮길 때의 최대 길이. 사유는 요약 로그 한 줄에 들어가므로
+# (main._short_reason 이 전체 사유를 다시 120자로 자른다) 본문 일부만 싣는다.
+_ERROR_BODY_SNIPPET_LEN = 80
+
+
+def _read_text_or_none(path):
+    """파일 내용을 문자열로 읽어 돌려준다. 경로가 없거나 읽지 못하면 None.
+
+    오류 본문 판별(_describe_error_body)의 보조 함수다. 판별은 사유를 구체적으로 남기기
+    위한 것이므로, 읽지 못했다고 여기서 예외를 올리지 않는다(읽기 실패 자체는 이후의
+    본 파싱 단계가 예외로 드러낸다).
+    """
+    if not path:
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _describe_error_body(body):
+    """text 형식으로 저장된 meta/latest 응답 본문이 오류 본문이면 사유 문자열을 돌려준다.
+
+    판별 범위(확인된 형식만 다룬다):
+      1. JSON 텍스트 ``{"err": "20", "errMsg": "..."}`` — KOSIS 가 HTTP 200 으로 돌려주는
+         오류 본문. 응답 형식을 XML 로 요청해도 오류는 이 형태로 올 수 있고, 수집 단계의
+         오류 판별은 JSON 형식 응답에만 적용되므로 text 형식에서는 파일에 그대로 저장된다.
+      2. XML 본문 안의 ``err`` / ``errMsg`` 요소 — 같은 필드 이름을 XML 로 옮긴 형태.
+         KOSIS 의 XML 오류 본문 규격은 확인된 바가 없어 이 이름이 있을 때만 값을 싣는다.
+         이 요소가 없으면 None 을 돌려주며, 그 경우의 실패 판정은 호출자의 기준
+         (latest: SendDe 요소 유무)에 맡긴다.
+
+    인자:
+        body: 파일 본문 문자열. None/빈 문자열이면 None 을 돌려준다.
+    반환:
+        오류 본문이면 ``KOSIS 오류 응답(err=..., errMsg=...)`` 형태의 사유, 아니면 None.
+        본문에는 요청 URL·인증키가 없으므로 사유에도 포함되지 않는다.
+    실패 시 동작:
+        예외를 올리지 않는다. 해석할 수 없는 본문은 "오류 본문으로 판별되지 않음"(None)이다.
+    """
+    if not body or not body.strip():
+        return None
+    stripped = body.strip()
+    if stripped.startswith('{'):
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and 'err' in parsed:
+            return f"KOSIS 오류 응답(err={parsed.get('err')}, errMsg={parsed.get('errMsg')})"
+        return None
+    if stripped.startswith('<'):
+        try:
+            root = ET.fromstring(stripped)
+        except ET.ParseError:
+            return None
+        # 루트 자신이 err 인 경우와 하위 요소인 경우를 모두 본다.
+        err = root.text if root.tag == 'err' else root.findtext('.//err')
+        err_msg = root.findtext('.//errMsg')
+        if err or err_msg:
+            return f"KOSIS 오류 응답(err={(err or '').strip()}, errMsg={(err_msg or '').strip()})"
+    return None
+
+
+def _require_latest_date(latest_path, stat_tbl_id):
+    """latest 파일에서 갱신일(SendDe)을 읽어 돌려준다. 얻지 못하면 적재 전 실패로 확정한다.
+
+    갱신일이 None 인 채로 적재를 진행하면 원본·통합 테이블 교체까지 실행된 뒤
+    stats_src_data_info.stat_latest_chn_dt(NOT NULL) 갱신에서 제약 위반으로 롤백된다.
+    데이터는 보존되지만 요약 로그의 사유가 DB 제약 위반 문구로 남아 "원천에서 갱신일을
+    받지 못했다"는 실제 원인을 알 수 없고, 되돌릴 삭제·적재를 한 번 실행하게 된다.
+    DB 에 쓰기 전에 같은 결과(기존 데이터 유지 + 실패 집계)를 명시적 사유로 낸다.
+
+    실패로 보는 경우:
+      - SendDe 값이 하나도 없다(빈 목록, SendDe 없는 행, XML 에 SendDe 요소 없음).
+      - latest 파일을 JSON/XML 로 해석할 수 없다(오류 안내문 등 다른 본문이 저장된 경우).
+    KOSIS 의 XML 오류 본문 규격은 확인된 바가 없으므로 "SendDe 요소를 찾지 못함"을 기준으로
+    삼고, 본문이 판별 가능한 오류 형태면(_describe_error_body) 그 코드·메시지를 사유에 덧붙인다.
+
+    인자:
+        latest_path: 수집 단계가 저장한 latest 파일 경로(.json 또는 그 외=XML).
+        stat_tbl_id: 사유 문자열 머리에 넣을 통계표 ID.
+    반환:
+        갱신일 문자열(YYYY-MM-DD). None 을 돌려주지 않는다.
+    실패 시 동작:
+        KosisDataValidationError — 호출자(worker)가 롤백 후 이 통계를 실패로 집계한다.
+        파일 자체가 없는 경우(OSError)는 판정 대상이 아니므로 그대로 전파한다.
+    """
+    detail = None
+    try:
+        latest_date = _parse_latest_file_for_latest_date(latest_path)
+    except (ValueError, ET.ParseError) as e:
+        # ValueError: json.JSONDecodeError 포함. ET.ParseError: XML 이 아닌 본문.
+        latest_date = None
+        detail = f"latest 응답을 해석할 수 없음({type(e).__name__})"
+    if latest_date:
+        return latest_date
+
+    body = _read_text_or_none(latest_path)
+    error_body = _describe_error_body(body)
+    if error_body:
+        detail = error_body
+    elif detail is None:
+        detail = "latest 응답에 SendDe 없음"
+        snippet = ' '.join((body or '').split())[:_ERROR_BODY_SNIPPET_LEN]
+        if snippet:
+            detail += f", 본문: {snippet}"
+    raise KosisDataValidationError(
+        f"[{stat_tbl_id}] 적재 중단(기존 데이터 유지): 갱신일을 확인하지 못함 — {detail}"
+    )
+
 
 def _parse_latest_file_for_latest_date(latest_path):
     """
