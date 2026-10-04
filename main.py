@@ -297,7 +297,47 @@ def save_single_file(args):
         logging.error(f"[{stat_tbl_id}] {func_name} - 파일 저장 중 에러: {e}", exc_info=True)
         raise RuntimeError(f"[{stat_tbl_id}] {func_name} - 파일 저장 실패") from e
 
-def save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict):
+def _short_reason(exc, limit=120):
+    """예외를 실행 요약(run_summary.log) 한 줄에 넣을 수 있는 짧은 사유로 바꾼다.
+
+    - 원인 예외(__cause__)가 있으면 그쪽 메시지를 쓴다. save_single_file 은 실제 원인을
+      "파일 저장 실패"라는 일반 문구의 RuntimeError 로 감싸 올리므로, 겉 예외만 보면
+      KOSIS 오류 코드 같은 실제 사유가 요약에 남지 않는다.
+    - 요약 로그는 ' | ' 로 필드를 구분하는 한 줄 형식이라 줄바꿈과 '|' 를 공백·'/' 로 바꾼다.
+    - limit(기본 120자): 통계 여러 건이 한꺼번에 실패해도 요약 한 줄이 과도하게 길어지지
+      않도록 사유 1건의 길이를 제한한다. 전체 내용은 날짜별 로그에 그대로 남는다.
+    """
+    root = exc.__cause__ if getattr(exc, '__cause__', None) is not None else exc
+    reason = str(root) or type(root).__name__
+    reason = reason.replace('\r', ' ').replace('\n', ' ').replace('|', '/')
+    return reason[:limit]
+
+
+def _format_failures(label, failures):
+    """[(stat_tbl_id, 사유), ...] 를 요약 로그의 error 필드 조각으로 만든다.
+
+    형식: ``<label>:<stat_tbl_id>(<사유>),<stat_tbl_id>(<사유>)`` — 사유가 비면 괄호를 생략한다.
+    """
+    parts = []
+    for stat_tbl_id, reason in failures:
+        parts.append(f"{stat_tbl_id}({reason})" if reason else str(stat_tbl_id))
+    return f"{label}:" + ",".join(parts)
+
+
+def save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict, failed_out=None):
+    """대상 통계의 meta/latest/data 를 병렬로 수집해 파일로 저장한다.
+
+    통계 1건의 수집 예외는 그 통계만 실패로 기록하고 나머지 통계는 계속 진행한다.
+    (future.result() 의 예외를 그대로 전파하면 1건 실패로 배치 전체가 중단되고,
+    이미 수집에 성공한 다른 통계까지 DB 적재가 수행되지 않는다.)
+
+    인자:
+        failed_out: 실패 목록을 받아 갈 리스트. (stat_tbl_id, 사유) 튜플이 추가된다.
+            None 이면 실패 목록을 돌려주지 않고 로그만 남긴다.
+    반환:
+        수집·저장에 성공한 통계의 파일 정보 리스트(save_single_file 반환값).
+        실패한 통계는 포함되지 않으므로 DB 적재 단계가 그 통계를 건드리지 않는다(기존 데이터 유지).
+    """
     saved_files_info = []
     parallel_workers = get_parallel_workers_file()
     args_list = []
@@ -308,9 +348,22 @@ def save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict):
             logging.warning(f"[{stat_tbl_id}] DB 매핑 정보 없음. 파일명에 unknown이 들어갈 수 있습니다.")
         args_list.append((api_info, stats_src, dirs, data_info))
     with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-        futures = [executor.submit(save_single_file, args) for args in args_list]
-        for future in as_completed(futures):
-            result = future.result()
+        # future → stat_tbl_id 매핑: 예외가 난 future 가 어느 통계인지 알아야 실패 목록에 적을 수 있다.
+        future_map = {
+            executor.submit(save_single_file, args): str(args[1]['stat_tbl_id'])
+            for args in args_list
+        }
+        for future in as_completed(future_map):
+            stat_tbl_id = future_map[future]
+            try:
+                result = future.result()
+            except Exception as e:
+                # 상세 원인·트레이스백은 save_single_file 이 이미 로그에 남겼다. 여기서는 집계만 한다.
+                reason = _short_reason(e)
+                logging.error(f"[{stat_tbl_id}] 수집 실패 — 이 통계만 건너뛰고 계속 진행: {reason}")
+                if failed_out is not None:
+                    failed_out.append((stat_tbl_id, reason))
+                continue
             saved_files_info.append(result)
     return saved_files_info
 
@@ -374,27 +427,50 @@ def main():
             ext_api_id = stats_src_list[0]['ext_api_id'] if stats_src_list else None
             stats_src_data_info_dict = get_stats_src_data_info(ext_api_id, stat_tbl_id_list)
 
-            saved_files_info = save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict)
+            # 수집 단계 실패 목록 [(stat_tbl_id, 사유)]. 실패한 통계는 saved_files_info 에 없으므로
+            # DB 단계에서 건드리지 않는다(기존 데이터 유지).
+            collect_failed = []
+            saved_files_info = save_all_files(
+                api_info, stats_src_list, dirs, stats_src_data_info_dict, failed_out=collect_failed
+            )
             summary['files_ok'] = len(saved_files_info)
 
+            # 요약 로그 error 필드에 실을 조각들(수집 실패 / 적재 실패). 건수는
+            # 수집 실패 = targets - files_ok, 적재 실패 = db_fail 로 요약 줄에서 읽을 수 있다.
+            error_parts = []
+            if collect_failed:
+                error_parts.append(_format_failures('collect_fail', collect_failed))
+
+            failed = []
             if args.mode == 'db':
                 logging.info("DB 삽입 모드를 시작합니다.")
-                db_result = process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_data_info_dict)
+                db_result = process_db_insertion(
+                    saved_files_info, api_info, stats_src_list, stats_src_data_info_dict,
+                    collect_failed=collect_failed,
+                )
                 summary['db_ok'] = len(db_result.get('succeeded', []))
                 failed = db_result.get('failed', [])
                 summary['db_fail'] = len(failed)
                 if failed:
-                    summary['status'] = 'PARTIAL'
-                    summary['error'] = "db_fail:" + ",".join(str(f[0]) for f in failed)
-                    exit_code = 2
-                    logging.error("일부 통계 적재 실패 — 부분 완료(종료코드 2).")
-                else:
-                    summary['status'] = 'SUCCESS'
-                    exit_code = 0
-                    logging.info("DB 삽입/수정 작업이 성공적으로 완료되었습니다.")
+                    error_parts.append(
+                        _format_failures('db_fail', [(f[0], _short_reason(Exception(f[1]))) for f in failed])
+                    )
+
+            # 종료 코드 규약: 0 성공 / 2 일부 통계 실패(부분 완료) / 1 치명적 오류.
+            # 수집 실패도 적재 실패와 같이 "일부 통계 실패"로 본다 — 실패가 1건이라도 있으면 0 이 아니다.
+            if collect_failed or failed:
+                summary['status'] = 'PARTIAL'
+                summary['error'] = ";".join(error_parts)
+                exit_code = 2
+                logging.error(
+                    "일부 통계 실패 — 부분 완료(종료코드 2). 수집 실패 %d건, 적재 실패 %d건.",
+                    len(collect_failed), len(failed),
+                )
             else:
                 summary['status'] = 'SUCCESS'
                 exit_code = 0
+                if args.mode == 'db':
+                    logging.info("DB 삽입/수정 작업이 성공적으로 완료되었습니다.")
 
         logging.info("모든 작업이 완료되었습니다.")
 

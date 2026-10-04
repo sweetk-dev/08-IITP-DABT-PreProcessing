@@ -109,6 +109,15 @@ def run_mobility(ext_sys: str, mode: str) -> dict:
         upsert = _UPSERT_DISPATCH[ext_sys]
         summary['db_ok'] = upsert(rows)
         logger.info('%s DB 적재 완료: %d행', ext_sys, summary['db_ok'])
+        # 분할 수집 수집기(KOWSI_FACL)의 진행 상태는 적재가 끝난 지금 확정한다.
+        #   - 위 upsert 가 예외를 올리면 이 줄에 도달하지 않으므로 상태가 전진하지 않고,
+        #     다음 실행이 같은 페이지 구간을 다시 스캔한다.
+        #   - file 모드에서는 DB 에 반영된 것이 없으므로 상태를 전진시키지 않는다.
+        #     (file 모드 실행으로 구간이 소진되면 그 구간은 다음 주기까지 DB 에 들어가지 않는다.)
+        # commit_state 가 없는 수집기(분할 수집을 하지 않는 소스)는 해당 없음.
+        commit_state = getattr(collector, 'commit_state', None)
+        if callable(commit_state):
+            commit_state()
 
     if ext_sys == 'GBIS':
         _collect_gbis_stations(collector, rows, save_dir, mode, summary)
