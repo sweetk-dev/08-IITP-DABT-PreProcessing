@@ -34,6 +34,9 @@ from typing import List, Optional
 from collectors.mobility_base import MobilityCollector
 
 GYEONGGI_INTERNAL_SIDO = '9410000'  # sys_common_code sido_code (내부용, prefix 9)
+LIST_PAGE_SIZE = 100
+# 구 하나의 무장애 장소는 수십 건이다. 이 상한을 넘으면 응답 이상으로 본다.
+LIST_MAX_PAGES = 20
 
 # detailWithTour2 응답 필드 → poi_tour_bf_facility 컬럼 (1:1 매핑분)
 DETAIL_FIELD_MAP = {
@@ -125,7 +128,7 @@ class TourBfCollector(MobilityCollector):
         return (self.base_url + '/areaBasedList2?' + self._common_qs()
                 + '&lDongRegnCd=' + self.ldong_regn_cd
                 + '&lDongSignguCd=' + signgu_cd
-                + '&numOfRows=100&pageNo=' + str(page_no))
+                + '&numOfRows=' + str(LIST_PAGE_SIZE) + '&pageNo=' + str(page_no))
 
     def _detail_url(self, content_id) -> str:
         return (self.base_url + '/detailWithTour2?' + self._common_qs()
@@ -138,9 +141,11 @@ class TourBfCollector(MobilityCollector):
         response = (data or {}).get('response') or {}
         header = response.get('header') or {}
         code = str(header.get('resultCode') or '').strip()
-        if code and code not in ('0000', '00'):
+        # 결과 코드가 없는 응답도 정상으로 보지 않는다 — 게이트웨이 오류 본문이 JSON 으로
+        # 와서 구 하나가 0건이 되면, 나머지 구만으로 절반 기준을 넘겨 멀쩡한 장소를 지운다.
+        if code not in ('0000', '00'):
             raise RuntimeError('TOUR_BF_API 오류 응답: resultCode=%s %s'
-                               % (code, str(header.get('resultMsg') or '')[:100]))
+                               % (code or '(없음)', str(header.get('resultMsg') or '')[:100]))
         return response.get('body') or {}
 
     def _fetch_signgu(self, signgu_cd: str) -> List[dict]:
@@ -152,9 +157,16 @@ class TourBfCollector(MobilityCollector):
             if isinstance(chunk, dict):
                 chunk = [chunk]
             items.extend(chunk)
-            total = int(body.get('totalCount') or 0)
-            if len(items) >= total or not chunk:
+            try:
+                total = int(body.get('totalCount') or 0)
+            except (TypeError, ValueError):
+                total = 0
+            # totalCount 가 비어 오는 응답도 있다 — 그때는 쪽이 꽉 찼는지로 다음 쪽을 판단한다.
+            if not chunk or len(chunk) < LIST_PAGE_SIZE or (total and len(items) >= total):
                 break
+            if page >= LIST_MAX_PAGES:
+                raise RuntimeError('TOUR_BF_API 목록이 %d쪽을 넘음 — 응답 이상으로 보고 중단 (lDongSignguCd=%s)'
+                                   % (LIST_MAX_PAGES, signgu_cd))
             page += 1
             self.pause()
         return items

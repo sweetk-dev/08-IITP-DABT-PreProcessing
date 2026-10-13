@@ -22,6 +22,8 @@ TABLE = 'poi_tour_bf_facility_itest'
 
 
 def _page(items, total, code='0000'):
+    if code is None:   # 결과 코드가 없는 응답(게이트웨이 오류 본문 등)
+        return {'response': {'body': {'items': '', 'totalCount': 0}}}
     return {'response': {'header': {'resultCode': code, 'resultMsg': 'OK'},
                          'body': {'items': {'item': items} if items else '', 'totalCount': total}}}
 
@@ -96,6 +98,23 @@ class FetchAreaListTests(unittest.TestCase):
         }
         items, _ = self._run(pages)
         self.assertEqual([i['title'] for i in items], ['only'])
+
+    def test_missing_total_count_still_paginates(self):
+        full = [{'contentid': 'a%d' % i, 'title': 'A%d' % i} for i in range(100)]
+        pages = {
+            ('171', 1): _page(full, None),
+            ('171', 2): _page([{'contentid': 'b1', 'title': 'B1'}], None),
+            ('173', 1): _page(None, 0),
+        }
+        items, calls = self._run(pages)
+        self.assertEqual(len(items), 101)
+        self.assertEqual(len(calls), 3)
+
+    def test_missing_result_code_raises(self):
+        pages = {('171', 1): _page(None, 0, code=None), ('173', 1): _page([{'contentid': '1'}], 1)}
+        with self.assertRaises(RuntimeError) as cm:
+            self._run(pages)
+        self.assertIn('(없음)', str(cm.exception))
 
     def test_error_result_code_raises(self):
         pages = {('171', 1): _page(None, 0, code='30'), ('173', 1): _page(None, 0)}
@@ -188,6 +207,46 @@ class UpsertTourBfDbTests(unittest.TestCase):
         st2 = self._state()
         self.assertEqual(len(st2), 6)
         self.assertEqual({k: v[2] for k, v in st2.items()}, {k: v[2] for k, v in st.items()})
+
+    def test_same_name_outside_scope_is_not_overwritten(self):
+        # 범위 밖(수원)에 같은 이름의 행이 있어도 안양 장소는 그 행을 덮어쓰지 않고 새로 만든다
+        rows = [_row('안양문화원', road='경기도 안양시 만안구 현충로 53'),
+                _row('평촌중앙공원', road='경기도 안양시 동안구 시민대로 1'),
+                _row('수원 화성', road='경기도 안양시 동안구 가상로 9')]
+        self.db_mobility.upsert_tour_bf(rows, addr_filter='경기도 안양시')
+        with self.engine.begin() as conn:
+            got = conn.execute(self.text(
+                "SELECT fclt_id, addr_road, del_yn FROM " + TABLE + " WHERE fclt_name='수원 화성' ORDER BY fclt_id")).fetchall()
+        self.assertEqual(len(got), 2)
+        self.assertEqual(got[0][0], self.ids['수원 화성'])
+        self.assertEqual(got[0][1], '경기도 수원시 팔달구 정조로 825')   # 원래 행 그대로
+        self.assertEqual([g[2] for g in got], ['N', 'N'])
+
+    def test_same_name_in_scope_kept_separately(self):
+        rows = [_row('안양문화원', road='경기도 안양시 만안구 현충로 53'),
+                _row('평촌중앙공원', road='경기도 안양시 동안구 시민대로 1'),
+                _row('평촌중앙공원', road='경기도 안양시 동안구 다른로 2')]
+        self.db_mobility.upsert_tour_bf(rows, addr_filter='경기도 안양시')
+        with self.engine.begin() as conn:
+            got = conn.execute(self.text(
+                "SELECT fclt_id, addr_road FROM " + TABLE + " WHERE fclt_name='평촌중앙공원' AND del_yn='N' ORDER BY fclt_id")).fetchall()
+        self.assertEqual([g[1] for g in got], ['경기도 안양시 동안구 시민대로 1', '경기도 안양시 동안구 다른로 2'])
+        self.assertEqual(got[0][0], self.ids['평촌중앙공원'])
+
+    def test_reappearing_place_is_reactivated(self):
+        base = [_row('안양문화원', road='경기도 안양시 만안구 현충로 53'),
+                _row('평촌중앙공원', road='경기도 안양시 동안구 시민대로 1')]
+        self.db_mobility.upsert_tour_bf(base, addr_filter='경기도 안양시')
+        self.assertEqual(self._state()['사라진 게스트하우스'][2], 'Y')
+        again = base + [_row('사라진 게스트하우스', road='경기도 안양시 만안구 없는로 1')]
+        self.db_mobility.upsert_tour_bf(again, addr_filter='경기도 안양시')
+        with self.engine.begin() as conn:
+            got = conn.execute(self.text(
+                "SELECT fclt_id, del_yn, deleted_at FROM " + TABLE + " WHERE fclt_name='사라진 게스트하우스'")).fetchall()
+        self.assertEqual(len(got), 1)                      # 새 행을 만들지 않고
+        self.assertEqual(got[0][0], self.ids['사라진 게스트하우스'])  # 같은 ID 를
+        self.assertEqual(got[0][1], 'N')                   # 되살린다
+        self.assertIsNone(got[0][2])
 
     def test_partial_response_keeps_rows(self):
         # 범위 안 기존 활성 3건 중 1건만 수집 — 50% 미만이라 삭제를 보류한다

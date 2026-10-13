@@ -336,6 +336,8 @@ def upsert_tour_bf(rows: List[dict], addr_filter: str = None) -> int:
       - 이번 실행에서 갱신·추가한 행이 아닌 범위 안 활성 행이 대상이다.
       - 방어: 범위 안 수집 건수가 기존 활성 행의 TOUR_BF_MIN_RATIO 미만이면 삭제하지 않고
         경고만 남긴다. 수집 0건이면 아무것도 하지 않는다.
+      - 매칭: 같은 이름 후보 중 범위가 같은 행만(범위 밖 동명 행을 덮어쓰지 않음), 활성·주소
+        일치 순. 한 실행에서 같은 행을 두 번 쓰지 않는다. 논리삭제된 행이 다시 나타나면 되살린다.
     전체가 한 트랜잭션. 반환은 갱신·추가한 행 수(종전과 같음).
     """
     import os
@@ -349,10 +351,12 @@ def upsert_tour_bf(rows: List[dict], addr_filter: str = None) -> int:
     if addr_filter is None:
         addr_filter = os.getenv('TOUR_BF_ADDR_FILTER', '경기도 안양시').strip()
     table = TOUR_BF_TABLE
+    # 같은 이름의 기존 행 후보 — 활성 행 우선, 그다음 최근에 논리삭제된 행(원천에 다시 나타난
+    # 장소는 새 행을 만들지 않고 되살려 ID 를 유지한다).
     select_sql = text(
-        "SELECT fclt_id FROM " + table +
-        " WHERE fclt_name=:fclt_name AND sido_code=:sido_code AND del_yn='N'"
-        " ORDER BY fclt_id LIMIT 1"
+        "SELECT fclt_id, del_yn, addr_road, addr_jibun FROM " + table +
+        " WHERE fclt_name=:fclt_name AND sido_code=:sido_code"
+        " ORDER BY (del_yn='N') DESC, deleted_at DESC NULLS LAST, fclt_id"
     )
     insert_sql = text(
         "INSERT INTO " + table + " ("
@@ -376,7 +380,8 @@ def upsert_tour_bf(rows: List[dict], addr_filter: str = None) -> int:
         " accessible_room_yn=:accessible_room_yn, stroller_rent_yn=:stroller_rent_yn,"
         " addr_road=:addr_road, addr_jibun=:addr_jibun, latitude=:latitude, longitude=:longitude,"
         " detail_raw=CAST(:detail_raw AS jsonb),"
-        " base_dt=CAST(:base_dt AS date), updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+        " base_dt=CAST(:base_dt AS date), updated_at=CURRENT_TIMESTAMP, updated_by=:created_by,"
+        " del_yn='N', deleted_at=NULL, deleted_by=NULL"
         " WHERE fclt_id=:fclt_id"
     )
     scope_sql = text(
@@ -390,9 +395,26 @@ def upsert_tour_bf(rows: List[dict], addr_filter: str = None) -> int:
         " WHERE fclt_id IN :ids"
     ).bindparams(bindparam('ids', expanding=True))
 
+    def _addr_in_scope(*addrs) -> bool:
+        return bool(addr_filter) and any(str(a or '').strip().startswith(addr_filter) for a in addrs)
+
     def _in_scope(row: dict) -> bool:
-        return bool(addr_filter) and any(
-            str(a or '').startswith(addr_filter) for a in (row.get('addr_road'), row.get('addr_jibun')))
+        return _addr_in_scope(row.get('addr_road'), row.get('addr_jibun'))
+
+    def _pick(candidates, row):
+        """같은 이름 후보 중 하나. 이번 실행에서 이미 쓴 행은 제외(동명 장소가 한 행으로
+        합쳐지지 않게), 범위가 같은 행만, 그 안에서 활성·주소 일치 순으로 고른다.
+        범위 안 장소가 범위 밖(경기도 다른 시군) 동명 행을 덮어쓰지 않게 한다."""
+        row_scope = _in_scope(row)
+        road = str(row.get('addr_road') or '').strip()
+        best = None
+        for cand_id, del_yn, c_road, c_jibun in candidates:
+            if cand_id in touched or _addr_in_scope(c_road, c_jibun) != row_scope:
+                continue
+            key = (del_yn != 'N', str(c_road or '').strip() != road)
+            if best is None or key < best[0]:
+                best = (key, cand_id)
+        return best[1] if best else None
 
     sido_codes = {r['sido_code'] for r in rows}
     count = 0
@@ -405,11 +427,11 @@ def upsert_tour_bf(rows: List[dict], addr_filter: str = None) -> int:
                     legacy[_id] = name
         for row in rows:
             params = dict(row, created_by=CREATED_BY)
-            found = conn.execute(select_sql, params).fetchone()
-            if found:
-                params['fclt_id'] = found[0]
+            fclt_id = _pick(conn.execute(select_sql, params).fetchall(), row)
+            if fclt_id is not None:
+                params['fclt_id'] = fclt_id
                 conn.execute(update_sql, params)
-                touched.add(found[0])
+                touched.add(fclt_id)
             else:
                 touched.add(conn.execute(insert_sql, params).scalar())
             count += 1
