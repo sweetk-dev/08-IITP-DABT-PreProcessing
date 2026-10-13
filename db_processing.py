@@ -7,6 +7,7 @@ from datetime import datetime
 from sqlalchemy import text
 from config import get_db_batch_size, get_parallel_workers_db
 import json as pyjson
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -77,8 +78,195 @@ def validate_kosis_data_response(data_json):
         return False, f"숫자 PRD_DE 를 가진 행이 없음(전체 {len(data_json)}행)"
     return True, ''
 
+
+# ===========================================================================
+# 통합 테이블 칸 배치 규칙 (sys_stats_src_api_info.intg_col_map, 01 v1.9.0)
+# ---------------------------------------------------------------------------
+# 통합 테이블(stats_dis_*)의 칸은 c1·c2·c3·itm_id 4개다. 종전에는 원본의 C1→c1, C2→c2, C3→c3,
+# ITM_ID→itm_id 로 고정해 옮겼다. 2026-10 KOSIS 가 등록장애인 통계 등 4종에서 예전 "항목"(성별·
+# 사회참여 활동)을 "분류"로 옮기면서 분류가 한 단계씩 늘었다. 통합 테이블과 그 소비처(공개 API·분석
+# 대시보드)는 예전 형태를 전제로 하므로, 늘어난 분류를 itm_id 칸으로 되돌려 넣는 규칙을 통계별로 둔다.
+#
+# 규칙 형식(JSON 객체) — 적지 않은 키는 종전 규칙
+#   "c1" | "c2" | "c3" | "itm_id" : 원본 칼럼 "C1"~"C4" | "ITM" | null(빈 값)
+#   "item_obj"                     : 메타데이터에서 "항목"으로 다룰 분류 객체 ID(OBJ_ID)
+# 예) 전국 연령별·장애정도별·성별 등록장애인수(N007, 분류 3단계: 연령·장애정도·성별)
+#     {"c3": null, "itm_id": "C3", "item_obj": "D"}
+#     → c1=연령, c2=장애정도, c3=빈 값, itm_id=성별(T001 계·T002 남자·T003 여자). 원래 항목(T001 인원)은 버린다.
+# ===========================================================================
+
+# 메타데이터에서 "항목" 객체를 나타내는 값. 공개 API(09)가 obj_nm = '항목' 으로 항목 이름을 찾는다.
+ITEM_OBJ_ID = 'ITEM'
+ITEM_OBJ_NM = '항목'
+
+_COL_MAP_TARGETS = ('c1', 'c2', 'c3', 'itm_id')
+# 규칙에 쓸 수 있는 원본 칼럼 → stats_kosis_origin_data 칼럼명. SQL 은 이 표의 값으로만 조립한다
+# (설정값 문자열을 SQL 에 그대로 넣지 않는다).
+_COL_MAP_SOURCES = {'C1': 'c1', 'C2': 'c2', 'C3': 'c3', 'C4': 'c4', 'ITM': 'itm_id'}
+# 원본 칼럼 → KOSIS 응답 JSON 키(적재 전 구조 검사용).
+_SRC_RESPONSE_KEY = {'C1': 'C1', 'C2': 'C2', 'C3': 'C3', 'C4': 'C4', 'ITM': 'ITM_ID'}
+_DEFAULT_COL_MAP = {'c1': 'C1', 'c2': 'C2', 'c3': 'C3', 'itm_id': 'ITM'}
+_OBJ_ID_RE = re.compile(r'^[A-Za-z0-9_]{1,40}$')
+# 통합 테이블 이름(stats_src_data_info.intg_tbl_id)은 SQL 에 식별자로 들어간다. 바인드 변수로 넣을 수 없으므로
+# 형식을 검사해 영문 소문자·숫자·밑줄로 된 이름만 허용한다(설정 오류·변조된 값이 SQL 로 섞이는 것을 막는다).
+_SAFE_IDENT = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
+
+
+def _require_safe_table(name, stat_tbl_id=''):
+    if not name or not _SAFE_IDENT.match(str(name)):
+        raise KosisDataValidationError(f"[{stat_tbl_id}] 통합 테이블 이름 형식 오류: {name!r}")
+    return name
+
+
+def parse_intg_col_map(raw, stat_tbl_id=''):
+    """intg_col_map 설정값을 해석·검증해 완성된 규칙을 돌려준다. DB 를 쓰지 않는 순수 함수.
+
+    인자:
+        raw: None / '' (종전 규칙) / JSON 문자열 / dict.
+        stat_tbl_id: 오류 사유 머리에 넣을 통계표 ID.
+    반환:
+        {'c1': 'C1', 'c2': 'C2', 'c3': 'C3', 'itm_id': 'ITM', 'item_obj': None, 'custom': False} 형태.
+        c2·c3 는 None(빈 값)일 수 있다. custom 은 설정값이 있었는지 여부.
+    실패 시 동작:
+        KosisDataValidationError — 잘못된 키·값, c1/itm_id 를 비우는 규칙, item_obj 없이 itm_id 를
+        분류에서 가져오는 규칙. DB 에 쓰기 전에 그 통계만 실패시킨다.
+    """
+    head = f"[{stat_tbl_id}] 칸 배치 규칙(intg_col_map) 오류"
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return dict(_DEFAULT_COL_MAP, item_obj=None, custom=False)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError as e:
+            raise KosisDataValidationError(f"{head}: JSON 해석 실패({e})")
+    if not isinstance(raw, dict):
+        raise KosisDataValidationError(f"{head}: JSON 객체가 아님({type(raw).__name__})")
+    unknown = set(raw) - set(_COL_MAP_TARGETS) - {'item_obj'}
+    if unknown:
+        raise KosisDataValidationError(f"{head}: 알 수 없는 키 {sorted(unknown)}")
+    rule = dict(_DEFAULT_COL_MAP)
+    for target in _COL_MAP_TARGETS:
+        if target not in raw:
+            continue
+        src = raw[target]
+        if src is not None:
+            src = str(src).strip().upper()
+            if src not in _COL_MAP_SOURCES:
+                raise KosisDataValidationError(f"{head}: {target} 의 원본 칼럼 '{raw[target]}' 은 허용되지 않음(C1~C4·ITM·null)")
+        rule[target] = src
+    for required in ('c1', 'itm_id'):
+        if rule[required] is None:
+            raise KosisDataValidationError(f"{head}: {required} 는 비울 수 없음(통합 테이블 NOT NULL)")
+    item_obj = raw.get('item_obj')
+    if item_obj is not None:
+        item_obj = str(item_obj).strip()
+        if not _OBJ_ID_RE.match(item_obj):
+            raise KosisDataValidationError(f"{head}: item_obj '{raw.get('item_obj')}' 형식 오류")
+    if rule['itm_id'] != 'ITM' and not item_obj:
+        # itm_id 에 분류 코드를 넣으면, 공개 API 가 그 코드의 이름을 메타의 '항목' 객체에서 찾는다.
+        # item_obj 로 메타도 함께 옮기지 않으면 이름을 못 찾아 응답이 실패한다.
+        raise KosisDataValidationError(f"{head}: itm_id 를 분류({rule['itm_id']})에서 가져오면 item_obj 를 지정해야 함")
+    used = [rule[t] for t in _COL_MAP_TARGETS if rule[t]]
+    if len(used) != len(set(used)):
+        raise KosisDataValidationError(f"{head}: 같은 원본 칼럼을 두 칸에 배치함 {used}")
+    rule['item_obj'] = item_obj
+    rule['custom'] = True
+    return rule
+
+
+def check_response_structure(data_json, rule, stat_tbl_id=''):
+    """칸 배치 규칙이 이번 응답의 구조와 맞는지 적재 전에 확인한다. DB 를 쓰지 않는 순수 함수.
+
+    validate_kosis_data_response 를 통과한 응답(dict 행의 리스트)을 받는다. 확인하는 것:
+      1. 값이 들어 있는 분류 단계(C1~C4)가 모두 통합 테이블 어딘가에 배치되는가.
+         - 배치되지 않은 단계가 있으면 그 분류가 통째로 버려진다. 이것이 KOSIS 분류 단계가 늘었을 때의
+           전형적인 증상이다(예: 성별이 4번째 분류로 추가되면 통합 테이블에 c4 칸이 없어 성별 구분이
+           사라지고, 키가 겹쳐 적재가 중복 키 오류로 끝난다). 원인이 드러나는 사유로 먼저 실패시킨다.
+      2. c1·itm_id 로 옮길 값이 빈 행이 없는가(통합 테이블 NOT NULL 칸).
+      3. itm_id 를 분류에서 가져오는 규칙이면, 원본의 항목(ITM_ID)이 1개뿐인가.
+         - 항목이 2개 이상으로 늘면(예: 인원·구성비) 분류를 itm_id 로 옮길 때 항목 구분이 사라진다.
+    반환: 없음.
+    실패 시 동작: KosisDataValidationError — 사유에 단계 이름(C#_OBJ_NM)·건수를 담는다.
+    """
+    head = f"[{stat_tbl_id}] 적재 중단(기존 데이터 유지): 구조 변경 감지"
+    rows = [r for r in data_json if _NUMERIC_PRD_DE.match(str(r.get('PRD_DE') or ''))]
+    used = {rule[t] for t in _COL_MAP_TARGETS if rule.get(t)}
+    for src in ('C1', 'C2', 'C3', 'C4'):
+        key = _SRC_RESPONSE_KEY[src]
+        filled = [r for r in rows if str(r.get(key) or '').strip()]
+        if filled and src not in used:
+            obj_nm = str(filled[0].get(f'{key}_OBJ_NM') or '').strip() or '이름 없음'
+            raise KosisDataValidationError(
+                f"{head} — 응답의 {src}({obj_nm}) 분류가 통합 테이블 칸에 배치되지 않음. "
+                f"KOSIS 분류 단계가 늘었을 수 있음(조회 주소 objL·칸 배치 규칙 intg_col_map 점검)"
+            )
+    for target in ('c1', 'itm_id'):
+        key = _SRC_RESPONSE_KEY[rule[target]]
+        empty = sum(1 for r in rows if not str(r.get(key) or '').strip())
+        if empty:
+            raise KosisDataValidationError(
+                f"{head} — 통합 테이블 {target} 에 넣을 {rule[target]} 값이 빈 행 {empty}건"
+            )
+    if rule['itm_id'] != 'ITM':
+        items = sorted({str(r.get('ITM_ID') or '').strip() for r in rows})
+        if len(items) != 1:
+            raise KosisDataValidationError(
+                f"{head} — 항목이 {len(items)}개({','.join(items[:5])}). 분류를 itm_id 로 옮기는 규칙은 "
+                f"항목이 1개일 때만 쓸 수 있음(조회 주소 itmId·칸 배치 규칙 점검)"
+            )
+
+
+def remap_meta_rows(rows, item_obj, stat_tbl_id=''):
+    """메타 행 목록에 칸 배치 규칙의 item_obj 를 적용한다. DB 를 쓰지 않는 순수 함수.
+
+    - item_obj 객체의 행 → obj_id='ITEM', obj_nm='항목' 으로 바꾼다(공개 API 가 itm_id 이름을 여기서 찾는다).
+    - 원래 항목 객체의 행(obj_id='ITEM' 또는 obj_nm='항목')은 버린다. 남겨 두면 같은 코드(예: T001 인원 /
+      T001 계)가 항목에 두 번 들어가 이름이 엇갈린다.
+    item_obj 가 없으면 rows 를 그대로 돌려준다.
+    실패 시 동작: 메타에 item_obj 객체가 없으면 KosisDataValidationError(규칙과 원천이 어긋남).
+    """
+    if not item_obj:
+        return rows
+    target = [r for r in rows if r.get('obj_id') == item_obj]
+    if not target:
+        objs = sorted({str(r.get('obj_id')) for r in rows})
+        raise KosisDataValidationError(
+            f"[{stat_tbl_id}] 적재 중단(기존 데이터 유지): 메타에 item_obj '{item_obj}' 객체가 없음(메타 객체 {objs})"
+        )
+    out = []
+    for r in rows:
+        if r.get('obj_id') == item_obj:
+            r = dict(r, obj_id=ITEM_OBJ_ID, obj_nm=ITEM_OBJ_NM)
+        elif r.get('obj_id') == ITEM_OBJ_ID or r.get('obj_nm') == ITEM_OBJ_NM:
+            continue
+        out.append(r)
+    return out
+
+
+def max_numeric_prd_de(data_json):
+    """응답에서 숫자로만 된 PRD_DE 의 최댓값(문자열). 없으면 None."""
+    vals = [str(r.get('PRD_DE')) for r in data_json
+            if isinstance(r, dict) and _NUMERIC_PRD_DE.match(str(r.get('PRD_DE') or ''))]
+    return max(vals, key=lambda v: (len(v), v)) if vals else None
+
+
+# 재구성 허용 — 운영자가 원천의 분류 체계 변경을 확인하고 "이번 한 번은 바뀐 대로 적재"할 때 쓴다.
+# 예) KOSIS_ACCEPT_RESHAPE=DT_11761_N007 python main.py --mode db   (ALL 이면 전 통계)
+# 수동 실행 명령줄에만 붙인다. .env 나 cron 에 넣어 두면 가드가 늘 꺼진 상태가 된다.
+ACCEPT_RESHAPE_ENV = 'KOSIS_ACCEPT_RESHAPE'
+# 같은 연도의 기존 행 가운데 새 응답과 키가 일치해야 하는 최소 비율. 원천이 값을 소급 수정해도 키
+# (시점·분류·항목 코드)는 그대로이므로 정상 갱신에서는 거의 100% 일치한다. 절반 아래로 떨어지면
+# 분류 체계·코드 변경이거나 칸 배치가 어긋난 것이다.
+KEY_MATCH_MIN_RATIO = 0.5
+
+
+def _reshape_accepted(stat_tbl_id):
+    raw = os.getenv(ACCEPT_RESHAPE_ENV, '')
+    ids = {x.strip() for x in raw.split(',') if x.strip()}
+    return 'ALL' in ids or stat_tbl_id in ids
+
 def process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_data_info_dict,
-                         collect_failed=None):
+                         collect_failed=None, update_system_sync=True):
     """
     저장된 파일들을 기반으로 DB에 데이터를 삽입/수정하는 전체 프로세스를 관리합니다.
     통계표 단위로 격리 커밋하며, 스레드에서는 종료시키지 않고 예외를 상위로 전달하여
@@ -91,6 +279,10 @@ def process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_d
     :param collect_failed: 수집(파일 저장) 단계에서 실패해 saved_files_info 에 없는 통계 목록
         [(stat_tbl_id, 사유), ...]. 하나라도 있으면 이 배치는 "전체 성공"이 아니므로
         sys_ext_api_info.latest_sync_time 을 갱신하지 않는다. None/빈 목록이면 영향 없음.
+    :param update_system_sync: False 면 전부 성공해도 sys_ext_api_info.latest_sync_time 을 갱신하지 않는다.
+        일부 통계만 실행(DATA_COLLECTION_SCOPE=PARTIAL)할 때 쓴다 — 그 시각은 "이 외부 시스템의 전 통계가
+        마지막으로 정상 동기화된 시각"인데, 일부만 돌린 실행으로 갱신하면 나머지 통계가 실패 중이어도
+        전체가 최신인 것처럼 보인다. 통계별 시각(sys_stats_src_api_info)은 성공한 통계만 그대로 갱신된다.
     :return: {"succeeded": [stat_tbl_id, ...], "failed": [(stat_tbl_id, error), ...]}
         failed 에는 DB 처리 단계의 실패만 담는다(collect_failed 는 호출자가 이미 갖고 있다).
     """
@@ -143,6 +335,10 @@ def process_db_insertion(saved_files_info, api_info, stats_src_list, stats_src_d
         )
         return {"succeeded": succeeded, "failed": []}
 
+    if not update_system_sync:
+        logging.info("일부 통계 실행(PARTIAL) — 시스템 전체 동기화 시각은 갱신하지 않습니다.")
+        return {"succeeded": succeeded, "failed": []}
+
     # 전체 성공 시에만 시스템 전체 동기화 시각 갱신(세션 누수 방지 위해 try/finally close)
     sync_session = Session()
     try:
@@ -158,6 +354,11 @@ def process_single_statistic(session, file_info, api_info, stats_src, stats_data
     (1단계 ~ 5단계 로직이 여기에 구현됩니다)
     """
     logging.info(f"[{stats_src.get('stat_tbl_id')}] 단일 통계 처리 시작.")
+    # 0. 칸 배치 규칙 해석 — 설정이 잘못됐으면 DB 에 쓰기 전에 이 통계만 실패시킨다.
+    col_rule = parse_intg_col_map(stats_src.get('intg_col_map'), file_info.get('stat_tbl_id'))
+    if col_rule['custom']:
+        logging.info(f"[{file_info.get('stat_tbl_id')}] 칸 배치 규칙 적용: "
+                     f"{ {k: col_rule[k] for k in _COL_MAP_TARGETS} }, item_obj={col_rule['item_obj']}")
     # 1. latest 파일 파싱 (최신 날짜 추출)
     # 갱신일(SendDe)을 얻지 못하면 여기서 실패로 확정한다(_require_latest_date 참고).
     # 이 시점에는 아직 아무 SQL 도 실행하지 않았으므로 기존 데이터가 그대로 남는다.
@@ -196,22 +397,29 @@ def process_single_statistic(session, file_info, api_info, stats_src, stats_data
         raise KosisDataValidationError(
             f"[{file_info.get('stat_tbl_id')}] 적재 중단(기존 데이터 유지): {reason}"
         )
+    # 2-2. 구조 검사 — 응답의 분류 단계·항목 수가 칸 배치 규칙과 맞는지(KOSIS 구조 변경 감지).
+    check_response_structure(data_json, col_rule, file_info.get('stat_tbl_id'))
 
     # 3. stats_kosis_origin_data 테이블에 bulk insert
     _insert_origin_data(session, data_json, file_info, stats_src, stats_data_info, latest_date)
     logging.info(f"stats_kosis_origin_data 테이블에 데이터 삽입 완료.")
 
     # 4. 통계 통합 테이블(intg_tbl_id)로 데이터 이관
-    _transfer_to_integration_table(session, file_info, stats_src, stats_data_info, latest_date)
+    _transfer_to_integration_table(session, file_info, stats_src, stats_data_info, latest_date, col_rule)
     logging.info(f"통계 통합 테이블({stats_data_info.get('intg_tbl_id')})로 데이터 이관 완료.")
 
     # 5. 메타데이터 테이블(stats_kosis_metadata_code) 적재
     meta_path = file_info['meta_path']
-    _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, latest_date)
+    _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, latest_date,
+                     item_obj=col_rule['item_obj'])
     logging.info(f"stats_kosis_metadata_code 테이블에 메타데이터 적재 완료.")
 
+    # 5-1. 메타 무결성 — 통합 테이블의 코드가 같은 갱신일 메타에 모두 있는지. 공개 API 는 이름을 못 찾는
+    # 코드가 하나라도 있으면 그 통계 요청 전체를 오류로 끝낸다. 어긋나면 이 트랜잭션 전체를 되돌린다.
+    _check_meta_integrity(session, file_info, stats_data_info, latest_date)
+
     # 6. stats_src_data_info 테이블 업데이트
-    _update_stats_src_data_info(session, file_info, data_json, latest_date)
+    _update_stats_src_data_info(session, file_info, data_json, latest_date, col_rule)
 
     # 7. sys_data_summary_info 테이블 업데이트
     _update_sys_data_summary_info(session, file_info, stats_data_info, latest_date)
@@ -458,7 +666,122 @@ def _insert_origin_data(session, data_json, file_info, stats_src, stats_data_inf
         )
         logging.info(f"stats_kosis_origin_data에 {len(batch)}건 bulk insert 완료.")
 
-def _transfer_to_integration_table(session, file_info, stats_src, stats_data_info, latest_date):
+def _intg_select_exprs(col_rule):
+    """칸 배치 규칙 → 이관 SELECT 의 (c1, c2, c3, itm_id) 식. 원본 칼럼명은 화이트리스트에서만 고른다."""
+    out = {}
+    for target in _COL_MAP_TARGETS:
+        src = col_rule.get(target)
+        out[target] = _COL_MAP_SOURCES[src] if src else "''"
+    return out
+
+
+def _check_reshape(session, intg_tbl_id, file_info, exprs):
+    """이번 응답이 기존 통합 행과 같은 모양인지 확인한다(이관 직전, 기존 행 삭제 전).
+
+    - 기존에 있던 연도가 이번 응답에 없으면 실패: 원천 제공 기간이 줄었거나 응답 일부가 빠진 경우다.
+      그대로 적재하면 그 연도가 통합 테이블에서 사라진다(통계별 전량 교체 방식이므로).
+    - 같은 연도의 기존 행 가운데 키(시점·분류·항목)가 이번 응답과 일치하는 비율이 KEY_MATCH_MIN_RATIO
+      미만이면 실패: 분류 체계·코드가 바뀌었거나 칸 배치 규칙이 어긋난 경우다. 오류 없이 다른 모양으로
+      덮어쓰는 것(예: 성별이 itm_id 대신 c3 로 들어가는 것)을 막는다.
+    기존 행이 없으면(최초 적재) 확인하지 않는다. KOSIS_ACCEPT_RESHAPE 로 통계별 1회 해제할 수 있다.
+    """
+    stat_tbl_id = file_info['stat_tbl_id']
+    sql = f"""
+    WITH old AS (
+        SELECT prd_de, c1, COALESCE(c2, '') AS c2, COALESCE(c3, '') AS c3, itm_id
+          FROM {intg_tbl_id} WHERE src_data_id = :src_data_id
+    ), new AS (
+        SELECT DISTINCT CAST(prd_de AS INTEGER) AS prd_de,
+               {exprs['c1']} AS c1, COALESCE({exprs['c2']}, '') AS c2,
+               COALESCE({exprs['c3']}, '') AS c3, {exprs['itm_id']} AS itm_id
+          FROM stats_kosis_origin_data
+         WHERE src_data_id = :src_data_id AND tbl_id = :stat_tbl_id AND prd_de ~ '^[0-9]+$'
+    )
+    SELECT (SELECT count(*) FROM old) AS old_n,
+           (SELECT count(*) FROM old WHERE prd_de IN (SELECT prd_de FROM new)) AS old_common,
+           (SELECT count(*) FROM old o WHERE EXISTS (
+                SELECT 1 FROM new n WHERE n.prd_de = o.prd_de AND n.c1 = o.c1
+                   AND n.c2 = o.c2 AND n.c3 = o.c3 AND n.itm_id = o.itm_id)) AS matched,
+           (SELECT string_agg(DISTINCT prd_de::text, ',') FROM old
+             WHERE prd_de NOT IN (SELECT prd_de FROM new)) AS missing_years
+    """
+    r = session.execute(text(sql), {'src_data_id': file_info['src_data_id'],
+                                    'stat_tbl_id': stat_tbl_id}).mappings().one()
+    if not r['old_n']:
+        return
+    problems = []
+    if r['missing_years']:
+        years = sorted(r['missing_years'].split(','))
+        problems.append(f"기존 연도 {','.join(years)} 가 이번 응답에 없음(원천 제공 기간 축소·응답 누락 의심)")
+    if r['old_common']:
+        ratio = r['matched'] / r['old_common']
+        logging.info(f"[{stat_tbl_id}] 기존 키 일치율 {ratio:.1%} ({r['matched']}/{r['old_common']})")
+        if ratio < KEY_MATCH_MIN_RATIO:
+            problems.append(
+                f"같은 연도 기존 행의 {ratio:.0%}만 이번 응답과 키가 일치(분류 체계·코드 변경 또는 칸 배치 규칙 불일치 의심)")
+    if not problems:
+        return
+    if _reshape_accepted(stat_tbl_id):
+        logging.warning(f"[{stat_tbl_id}] {ACCEPT_RESHAPE_ENV} 로 허용 — {'; '.join(problems)}")
+        return
+    raise KosisDataValidationError(
+        f"[{stat_tbl_id}] 적재 중단(기존 데이터 유지): {'; '.join(problems)}. "
+        f"원천 변경을 확인했다면 {ACCEPT_RESHAPE_ENV}={stat_tbl_id} 로 수동 실행"
+    )
+
+
+def _check_meta_integrity(session, file_info, stats_data_info, latest_date):
+    """통합 테이블의 이 통계 코드가 같은 갱신일 메타에 모두 있는지 확인한다(공개 API 조회 규칙과 같은 기준).
+
+    공개 API(09)는 통합 행의 c1~c3 이름을 메타의 분류 객체(obj_nm <> '항목')에서, itm_id 이름을 항목 객체
+    (obj_nm = '항목')에서 찾고, 하나라도 못 찾으면 그 요청 전체를 오류로 끝낸다. 갱신일은
+    stats_src_data_info.stat_latest_chn_dt(= 이번 latest_date)와 같은 메타만 본다.
+    실패 시 동작: KosisDataValidationError(못 찾은 코드 최대 10개를 사유에 담는다) → 트랜잭션 롤백.
+    """
+    intg_tbl_id = stats_data_info.get('intg_tbl_id')
+    if not intg_tbl_id:
+        return
+    _require_safe_table(intg_tbl_id, file_info['stat_tbl_id'])
+    params = {'src_data_id': file_info['src_data_id'], 'latest_date': latest_date,
+              'item_nm': ITEM_OBJ_NM}
+    sql = f"""
+    WITH meta AS (
+        SELECT itm_id, obj_nm FROM stats_kosis_metadata_code
+         WHERE src_data_id = :src_data_id AND stat_latest_chn_dt = :latest_date
+    ), cat AS (
+        SELECT DISTINCT v FROM (
+            SELECT c1 AS v FROM {intg_tbl_id} WHERE src_data_id = :src_data_id
+            UNION SELECT c2 FROM {intg_tbl_id} WHERE src_data_id = :src_data_id
+            UNION SELECT c3 FROM {intg_tbl_id} WHERE src_data_id = :src_data_id) a
+         WHERE COALESCE(v, '') <> ''
+    ), itm AS (
+        SELECT DISTINCT itm_id AS v FROM {intg_tbl_id} WHERE src_data_id = :src_data_id
+    ), miss_cat AS (   -- NOT IN 은 메타에 NULL 이 하나라도 있으면 아무것도 걸러내지 못한다 → NOT EXISTS
+        SELECT v FROM cat c WHERE NOT EXISTS
+            (SELECT 1 FROM meta m WHERE m.itm_id = c.v AND m.obj_nm <> :item_nm)
+    ), miss_itm AS (
+        SELECT v FROM itm i WHERE NOT EXISTS
+            (SELECT 1 FROM meta m WHERE m.itm_id = i.v AND m.obj_nm = :item_nm)
+    )
+    SELECT (SELECT string_agg(v, ',') FROM (SELECT v FROM miss_cat ORDER BY v LIMIT 10) x) AS miss_cat,
+           (SELECT count(*) FROM miss_cat) AS miss_cat_n,
+           (SELECT string_agg(v, ',') FROM (SELECT v FROM miss_itm ORDER BY v LIMIT 10) y) AS miss_itm,
+           (SELECT count(*) FROM miss_itm) AS miss_itm_n
+    """
+    r = session.execute(text(sql), params).mappings().one()
+    if r['miss_cat_n'] or r['miss_itm_n']:
+        parts = []
+        if r['miss_cat_n']:
+            parts.append(f"분류 코드 {r['miss_cat_n']}건({r['miss_cat']})")
+        if r['miss_itm_n']:
+            parts.append(f"항목 코드 {r['miss_itm_n']}건({r['miss_itm']})")
+        raise KosisDataValidationError(
+            f"[{file_info['stat_tbl_id']}] 적재 중단(기존 데이터 유지): 메타에 이름이 없는 "
+            f"{' · '.join(parts)} — 그대로 두면 공개 API 조회가 실패함(메타 응답·칸 배치 규칙 점검)"
+        )
+
+
+def _transfer_to_integration_table(session, file_info, stats_src, stats_data_info, latest_date, col_rule=None):
     """
     stats_kosis_origin_data에서 intg_tbl_id(통합 테이블)로 데이터 이관
     1. 통합 테이블에서 해당 통계(src_data_id)의 행을 전부 삭제
@@ -479,8 +802,16 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
       - 이관 결과가 0행이면 예외를 올린다. 삭제와 이관은 호출자의 한 트랜잭션 안에 있으므로
         예외 시 삭제까지 롤백되어 기존 행이 그대로 남는다(통합 테이블이 비는 일이 없다).
 
+    칸 배치 규칙(col_rule)
+      - parse_intg_col_map 이 돌려준 규칙. None 이면 종전 규칙(C1→c1, C2→c2, C3→c3, ITM→itm_id).
+      - 이관 SELECT 의 c1·c2·c3·itm_id 식은 _intg_select_exprs 가 화이트리스트로만 조립한다.
+      - 기존 행을 지우기 전에 _check_reshape 로 "같은 모양으로 갱신되는지"를 확인한다.
+
     실패 시 동작: 예외 전파 → 호출자(worker)가 rollback 후 실패 집계.
     """
+    if col_rule is None:
+        col_rule = parse_intg_col_map(None)
+    exprs = _intg_select_exprs(col_rule)
     intg_tbl_id = stats_data_info.get('intg_tbl_id')
     src_data_id = file_info['src_data_id']
     stat_tbl_id = file_info['stat_tbl_id']
@@ -488,6 +819,10 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
     if not intg_tbl_id:
         logging.warning(f"intg_tbl_id가 없어 통합 테이블 이관을 건너뜁니다. stat_tbl_id={stat_tbl_id}")
         return
+    _require_safe_table(intg_tbl_id, stat_tbl_id)
+
+    # 0. 모양 확인 — 기존 연도 누락·키 불일치면 지우기 전에 중단한다.
+    _check_reshape(session, intg_tbl_id, file_info, exprs)
 
     # 1. 기존 데이터 삭제 — 해당 통계의 행 전부(갱신일·생성일 조건 없음, 이유는 docstring 참고)
     delete_sql = f"""
@@ -512,8 +847,8 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
         SELECT 
             src_data_id,
             CAST(prd_de AS INTEGER),
-            c1, c2, c3,
-            itm_id,
+            {exprs['c1']}, {exprs['c2']}, {exprs['c3']},
+            {exprs['itm_id']},
             unit_nm,
             dt,  -- 문자열 그대로
             NULLIF(lst_chn_de, '')::date,
@@ -533,8 +868,8 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
         SELECT 
             src_data_id,
             CAST(prd_de AS INTEGER),
-            c1, c2, c3,
-            itm_id,
+            {exprs['c1']}, {exprs['c2']}, {exprs['c3']},
+            {exprs['itm_id']},
             unit_nm,
             CASE WHEN dt = '-' OR dt = '' THEN 0 ELSE CAST(dt AS NUMERIC(15,3)) END,
             NULLIF(lst_chn_de, '')::date,
@@ -574,7 +909,7 @@ def parse_xml_skip_leading_nonxml(file_path):
     xml_str = ''.join(lines[xml_start:])
     return ET.fromstring(xml_str)
 
-def _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, latest_date):
+def _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, latest_date, item_obj=None):
     """
     meta XML 파일을 파싱하여 stats_kosis_metadata_code 테이블에 데이터 삭제 및 bulk insert
 
@@ -585,6 +920,9 @@ def _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, 
         못해 실행할 때마다 메타가 한 벌씩 늘어난다.
     파싱을 삭제보다 먼저 한다: 메타 파일을 읽지 못하거나 MetaRow 가 하나도 없을 때
     기존 메타를 지운 채 끝나지 않게 하기 위해서다(행이 없으면 기존 메타를 그대로 둔다).
+
+    item_obj: 칸 배치 규칙의 item_obj. 지정되면 remap_meta_rows 로 그 분류 객체를 '항목'으로 바꾸고
+    원래 항목 행은 버린다(통합 테이블 itm_id 에 그 분류 코드가 들어가므로).
     """
     from config import get_db_batch_size
     src_data_id = file_info['src_data_id']
@@ -614,6 +952,7 @@ def _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, 
     if not rows:
         logging.warning("삽입할 메타데이터가 없습니다. 기존 메타데이터를 유지합니다.")
         return
+    rows = remap_meta_rows(rows, item_obj, stat_tbl_id)
 
     # 2. 기존 데이터 삭제 — 해당 통계의 메타 전부(이전 갱신일 분 포함)
     delete_sql = """
@@ -647,7 +986,7 @@ def _insert_metadata(session, meta_path, file_info, stats_src, stats_data_info, 
         )
         logging.info(f"stats_kosis_metadata_code에 {len(batch)}건 bulk insert 완료.")
 
-def _update_stats_src_data_info(session, file_info, data_json, latest_date):
+def _update_stats_src_data_info(session, file_info, data_json, latest_date, col_rule=None):
     """
     stats_src_data_info 테이블의 stat_latest_chn_dt, stat_data_ref_dt, avail_cat_cols 컬럼 업데이트
     updated_at, updated_by도 같이 업데이트
@@ -663,15 +1002,35 @@ def _update_stats_src_data_info(session, file_info, data_json, latest_date):
     # 단일 dict 응답(KOSIS 단건)도 리스트로 정규화하고, dict 아닌 요소는 건너뜀
     rows_iter = data_json if isinstance(data_json, list) else [data_json]
     cat_cols = []
-    for c in ['c1', 'c2', 'c3', 'c4']:
-        if any(isinstance(row, dict) and (row.get(c.upper()) or row.get(c)) for row in rows_iter):
-            cat_cols.append(c)
+    if col_rule and col_rule.get('custom'):
+        # 칸 배치 규칙이 있으면 통합 테이블에 실제로 값이 들어간 분류 칸을 적는다(원본 응답의 C# 이 아니라).
+        # 예) N007: 응답은 C1~C3 이지만 C3(성별)은 itm_id 로 옮겨지므로 ["c1","c2"].
+        for c in ['c1', 'c2', 'c3']:
+            src = col_rule.get(c)
+            key = _SRC_RESPONSE_KEY[src] if src else None
+            if key and any(isinstance(row, dict) and str(row.get(key) or '').strip() for row in rows_iter):
+                cat_cols.append(c)
+    else:
+        for c in ['c1', 'c2', 'c3', 'c4']:
+            if any(isinstance(row, dict) and (row.get(c.upper()) or row.get(c)) for row in rows_iter):
+                cat_cols.append(c)
     avail_cat_cols = pyjson.dumps(cat_cols, ensure_ascii=False)
+    # 수집 종료연도(collect_end_dt) — 이번에 실제로 받은 마지막 시점으로 앞당긴다(줄이지는 않는다).
+    # 수집 요청은 연도 주기 통계에서 "올해"까지 넓혀 보내므로(kosis_api.resolve_collect_years), 새 연도가
+    # 공표되어 들어왔으면 여기서 등록값도 따라간다. 공개 API 의 수집기간 표기가 이 값을 쓴다.
+    # 연도 표기(4자리)일 때만 갱신한다 — 월·분기 시점(YYYYMM 등)은 등록값 형식과 달라 건드리지 않는다.
+    max_prd = max_numeric_prd_de(rows_iter)
+    new_end = max_prd if (max_prd and len(max_prd) == 4) else None
     update_sql = """
     UPDATE stats_src_data_info
     SET stat_latest_chn_dt = :stat_latest_chn_dt,
         stat_data_ref_dt = :stat_data_ref_dt,
         avail_cat_cols = :avail_cat_cols,
+        collect_end_dt = CASE
+            WHEN CAST(:new_end AS varchar) IS NOT NULL
+             AND collect_end_dt ~ '^[0-9]{4}$'
+             AND CAST(:new_end AS varchar) > collect_end_dt THEN CAST(:new_end AS varchar)
+            ELSE collect_end_dt END,
         updated_at = :updated_at,
         updated_by = :updated_by
     WHERE src_data_id = :src_data_id
@@ -683,6 +1042,7 @@ def _update_stats_src_data_info(session, file_info, data_json, latest_date):
             'stat_latest_chn_dt': stat_latest_chn_dt,
             'stat_data_ref_dt': stat_data_ref_dt,
             'avail_cat_cols': avail_cat_cols,
+            'new_end': new_end,
             'updated_at': updated_at,
             'updated_by': updated_by,
             'src_data_id': src_data_id,
