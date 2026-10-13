@@ -1,6 +1,6 @@
 # 장애인 이동편의 공공데이터 멀티소스 수집·전처리 툴
 
-![version](https://img.shields.io/badge/version-v1.16.4-blue)
+![version](https://img.shields.io/badge/version-v1.17.0-blue)
 
 ## 개요
 장애인 이동편의·편의시설 관련 공공데이터를 소스별 수집 어댑터로 수집해, 파일 저장·정제·DB 적재까지 처리하는 Python 기반 툴입니다.
@@ -265,6 +265,13 @@ python scripts/load_krna_station_csv.py --csv 국가철도공단_수도권1호�
 
 - 종료 코드: `0` 성공 / `2` 일부 통계 수집·적재 실패(부분 완료) / `1` 치명적 오류(대상 통계 전부 수집 실패 포함). 자세한 기준은 "주요 유의사항" 참고
 - 실행 요약: 매 실행 1줄이 `logs/run_summary.log` 에 누적됩니다(기존 날짜별 로그는 그대로 유지).
+- 실행 기록·이상 알림(v1.17.0): 매 실행 1행이 DB `sys_batch_run_log` 에 남고, 정기 실행(db 모드·전체 범위)이 실패하거나 실패 뒤 다시 성공하면 알림 메일을 보냅니다. 수신 주소는 DB `sys_ops_setting`(운영 콘솔에서 수정), 발신 방식은 `.env` 의 `MAIL_*` 설정입니다(`.env.example` 참고). 시험 발송: `python scripts/send_test_alert.py`.
+
+## KOSIS 통계표 구조 변경 대응 (v1.17.0)
+
+KOSIS 가 통계표의 분류 단계·항목 구성을 바꾸면 기존 조회 주소가 실패하거나, 받아도 통합 테이블의 모양이 달라집니다. 이때는 코드를 고치지 않고 `sys_stats_src_api_info` 의 조회 주소(`api_data_url`)와 **통합 테이블 칸 배치 규칙(`intg_col_map`)** 만 고칩니다. 적재 직전에 응답 구조·기존 데이터와의 키 일치·메타 이름 누락을 확인하고, 어긋나면 그 통계만 되돌려 기존 데이터를 지킵니다. 연도 주기 통계는 수집 종료연도를 올해까지 넓혀 요청합니다.
+
+절차: [`docs/operations/kosis-structure-change-runbook.md`](docs/operations/kosis-structure-change-runbook.md)
 
 ## 참고
 - Python 3.8 이상 권장

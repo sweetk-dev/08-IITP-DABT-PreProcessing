@@ -11,16 +11,27 @@ engine = create_engine(
     DB_URL,
     pool_pre_ping=True,      # 끊긴 커넥션 자동 감지(원격 DB 일시 단절 대비)
     pool_recycle=1800,       # 30분마다 커넥션 재생성(stale 방지)
-    connect_args={'connect_timeout': 10},
+    # 세션 시간대를 접속 옵션으로 KST 에 고정한다. 아래 set_timezone(접속 직후 SET TIME ZONE)만으로는
+    # 그 SET 이 트랜잭션 안에서 실행된 뒤 커넥션 풀 반환 시 ROLLBACK 으로 취소되어, 두 번째 사용부터
+    # 세션이 UTC 로 돌아간다(2026-10-13 실측: engine.connect 는 Asia/Seoul, Session 은 Etc/UTC).
+    # 그 결과 'YYYY-MM-DD HH:MM:SS'(KST) 문자열로 쓰는 latest_sync_time·updated_at 이 UTC 로 해석돼
+    # 9시간 늦게 저장됐다. options 는 접속 시작 파라미터라 롤백과 무관하게 유지된다.
+    connect_args={'connect_timeout': 10, 'options': '-c timezone=Asia/Seoul'},
 ) if DB_URL else None
 Session = sessionmaker(bind=engine) if engine else None
 
 db_logger = logging.getLogger('db')
 
 def set_timezone(dbapi_connection, connection_record):
+    # 접속 옵션(connect_args.options)이 시간대를 정한다. 이 SET 은 커밋해 두어 옵션을 쓰지 않는
+    # 드라이버·URL 에서도 풀 반환 ROLLBACK 에 취소되지 않게 한다.
     cursor = dbapi_connection.cursor()
     cursor.execute("SET TIME ZONE 'Asia/Seoul';")
     cursor.close()
+    try:
+        dbapi_connection.commit()
+    except Exception:  # noqa: BLE001 — autocommit 커넥션 등
+        pass
 
 # 엔진에 이벤트 리스너 등록
 if engine:
@@ -103,9 +114,19 @@ def get_stats_src_api_info(ext_api_id):
             db_logger.warning("ext_api_id가 없어 통계 소스 정보를 조회할 수 없습니다.")
             return []
         
-        query = text("""
+        # intg_col_map(통합 테이블 칸 배치 규칙, 01 v1.9.0)은 칼럼이 있을 때만 읽는다.
+        # 01 마이그레이션 전 DB 에서도 배치가 그대로 돌게 하기 위해서다(없으면 전 통계 NULL = 종전 규칙).
+        has_col_map = bool(session.execute(text("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'sys_stats_src_api_info' AND column_name = 'intg_col_map'
+        """)).first())
+        if not has_col_map:
+            db_logger.warning("sys_stats_src_api_info.intg_col_map 칼럼 없음 — 01 v1.9.0 미적용, 종전 칸 배치 규칙으로 진행")
+        col_map_sql = "intg_col_map::text AS intg_col_map" if has_col_map else "NULL AS intg_col_map"
+        query = text(f"""
             SELECT stat_api_id, ext_api_id, status, del_yn, stat_title, stat_tbl_id,
-                   use_base_url_yn, api_data_url, api_meta_url, api_latest_chn_dt_url
+                   use_base_url_yn, api_data_url, api_meta_url, api_latest_chn_dt_url,
+                   {col_map_sql}
             FROM sys_stats_src_api_info 
             WHERE ext_api_id = :ext_api_id AND del_yn = 'N' AND status = 'A'
             ORDER BY stat_api_id
@@ -126,7 +147,10 @@ def get_stats_src_api_info(ext_api_id):
                 'use_base_url_yn': row.use_base_url_yn,
                 'api_data_url': row.api_data_url,
                 'api_meta_url': row.api_meta_url,
-                'api_latest_chn_dt_url': row.api_latest_chn_dt_url
+                'api_latest_chn_dt_url': row.api_latest_chn_dt_url,
+                # JSON 텍스트(또는 None). 해석·검증은 적재 단계(db_processing.parse_intg_col_map)가 한다 —
+                # 잘못된 규칙이면 그 통계만 실패시키고 나머지는 계속 진행하기 위해서다.
+                'intg_col_map': row.intg_col_map,
             }
             stats_src_list.append(stats_src)
         
