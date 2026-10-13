@@ -236,6 +236,15 @@ def save_single_file(args):
     _end = data_info.get('collect_end_dt', 'unknown')
     from_str = str(_start)[:4] if str(_start) not in ('unknown', '', 'None') else 'unknown'
     to_str = str(_end)[:4] if str(_end) not in ('unknown', '', 'None') else 'unknown'
+    # KOSIS 연도 주기 통계는 수집 종료연도를 올해까지 넓혀 요청한다(v1.17.0). 파일 이름의 기간도 실제 요청 기간으로.
+    if data_info and str(stats_src.get('api_data_url') or '').find('prdSe=') >= 0:
+        try:
+            import kosis_api
+            _f, _t, _known = kosis_api.resolve_collect_years(stats_src, data_info)
+            if _f and _t:
+                from_str, to_str = str(_f), str(_t)
+        except Exception:  # noqa: BLE001 — 파일 이름용 정보일 뿐이므로 실패해도 종전 값으로 둔다
+            pass
     meta_format = 'xml'
     func_name = 'save_single_file'
 

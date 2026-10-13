@@ -11,16 +11,27 @@ engine = create_engine(
     DB_URL,
     pool_pre_ping=True,      # 끊긴 커넥션 자동 감지(원격 DB 일시 단절 대비)
     pool_recycle=1800,       # 30분마다 커넥션 재생성(stale 방지)
-    connect_args={'connect_timeout': 10},
+    # 세션 시간대를 접속 옵션으로 KST 에 고정한다. 아래 set_timezone(접속 직후 SET TIME ZONE)만으로는
+    # 그 SET 이 트랜잭션 안에서 실행된 뒤 커넥션 풀 반환 시 ROLLBACK 으로 취소되어, 두 번째 사용부터
+    # 세션이 UTC 로 돌아간다(2026-10-13 실측: engine.connect 는 Asia/Seoul, Session 은 Etc/UTC).
+    # 그 결과 'YYYY-MM-DD HH:MM:SS'(KST) 문자열로 쓰는 latest_sync_time·updated_at 이 UTC 로 해석돼
+    # 9시간 늦게 저장됐다. options 는 접속 시작 파라미터라 롤백과 무관하게 유지된다.
+    connect_args={'connect_timeout': 10, 'options': '-c timezone=Asia/Seoul'},
 ) if DB_URL else None
 Session = sessionmaker(bind=engine) if engine else None
 
 db_logger = logging.getLogger('db')
 
 def set_timezone(dbapi_connection, connection_record):
+    # 접속 옵션(connect_args.options)이 시간대를 정한다. 이 SET 은 커밋해 두어 옵션을 쓰지 않는
+    # 드라이버·URL 에서도 풀 반환 ROLLBACK 에 취소되지 않게 한다.
     cursor = dbapi_connection.cursor()
     cursor.execute("SET TIME ZONE 'Asia/Seoul';")
     cursor.close()
+    try:
+        dbapi_connection.commit()
+    except Exception:  # noqa: BLE001 — autocommit 커넥션 등
+        pass
 
 # 엔진에 이벤트 리스너 등록
 if engine:
