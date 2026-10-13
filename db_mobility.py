@@ -11,7 +11,7 @@
 - poi_station_toilet_unit      (KRNA_STN CSV)  선명·disabled_yn 단위 전체 교체
 - poi_station_platform         (KRNA_STN CSV)  ON CONFLICT (line_name, stn_name, platform_no) + 이격거리 요약 UPDATE
 - poi_facility_accessibility   (KOWSI_FACL)    ON CONFLICT (facl_inf_id)
-- poi_tour_bf_facility         (TOUR_BF_API)   자연키 없음 → (fclt_name, sido_code) 조회 후 UPDATE/INSERT
+- poi_tour_bf_facility         (TOUR_BF_API)   자연키 없음 → (fclt_name, sido_code) 조회 후 UPDATE/INSERT / 범위 안 사라진 행 논리삭제
 - poi_public_toilet_info       (GG_TOILET)     자연키 없음 → (이름+주소) 매칭 UPDATE / 미매칭 INSERT / 사라진 행 논리삭제
 - poi_emergency_support        (GG_ASSIST_REPAIR) ON CONFLICT (support_type, name, coalesce(addr_road,''))
 
@@ -321,18 +321,41 @@ def upsert_facilities(rows: List[dict]) -> int:
     return _execute_batch(sql, rows)
 
 
-def upsert_tour_bf(rows: List[dict]) -> int:
-    """poi_tour_bf_facility — 자연키(UNIQUE) 부재로 (fclt_name, sido_code) 조회 후 분기."""
+TOUR_BF_TABLE = 'poi_tour_bf_facility'
+# 원천에서 사라진 행을 논리삭제할 때의 안전선 — 이번 수집 건수가 범위 안 기존 활성 행의
+# 이 비율 미만이면 원천 일부 장애로 보고 삭제하지 않는다(갱신·추가는 그대로 한다).
+TOUR_BF_MIN_RATIO = 0.5
+
+
+def upsert_tour_bf(rows: List[dict], addr_filter: str = None) -> int:
+    """poi_tour_bf_facility — 자연키(UNIQUE) 부재로 (fclt_name, sido_code) 조회 후 분기.
+
+    v1.17.1 (#120): 수집 범위 안에서 원천에서 사라진 장소를 논리삭제(del_yn='Y')한다.
+      - 범위: sido_code 일치 + 도로명·지번 주소가 addr_filter(기본 '경기도 안양시')로 시작.
+        2025년에 다른 경로로 넣은 경기도 다른 시군 행은 범위 밖이라 건드리지 않는다.
+      - 이번 실행에서 갱신·추가한 행이 아닌 범위 안 활성 행이 대상이다.
+      - 방어: 범위 안 수집 건수가 기존 활성 행의 TOUR_BF_MIN_RATIO 미만이면 삭제하지 않고
+        경고만 남긴다. 수집 0건이면 아무것도 하지 않는다.
+    전체가 한 트랜잭션. 반환은 갱신·추가한 행 수(종전과 같음).
+    """
+    import os
+    from sqlalchemy import bindparam
+
     if not rows:
+        logger.warning('%s: 수집 0건 — 기존 행을 유지하고 적재를 건너뜀', TOUR_BF_TABLE)
         return 0
     if engine is None:
         raise RuntimeError('DB engine not configured (DB_URL)')
+    if addr_filter is None:
+        addr_filter = os.getenv('TOUR_BF_ADDR_FILTER', '경기도 안양시').strip()
+    table = TOUR_BF_TABLE
     select_sql = text(
-        "SELECT fclt_id FROM poi_tour_bf_facility"
+        "SELECT fclt_id FROM " + table +
         " WHERE fclt_name=:fclt_name AND sido_code=:sido_code AND del_yn='N'"
+        " ORDER BY fclt_id LIMIT 1"
     )
     insert_sql = text(
-        "INSERT INTO poi_tour_bf_facility ("
+        "INSERT INTO " + table + " ("
         " sido_code, fclt_name, toilet_yn, elevator_yn, parking_yn, slope_yn,"
         " subway_yn, bus_stop_yn, wheelchair_rent_yn, tactile_map_yn, audio_guide_yn,"
         " nursing_room_yn, accessible_room_yn, stroller_rent_yn,"
@@ -342,9 +365,10 @@ def upsert_tour_bf(rows: List[dict]) -> int:
         " :nursing_room_yn, :accessible_room_yn, :stroller_rent_yn,"
         " :addr_road, :addr_jibun, :latitude, :longitude, CAST(:detail_raw AS jsonb),"
         " CAST(:base_dt AS date), :created_by)"
+        " RETURNING fclt_id"
     )
     update_sql = text(
-        "UPDATE poi_tour_bf_facility SET"
+        "UPDATE " + table + " SET"
         " toilet_yn=:toilet_yn, elevator_yn=:elevator_yn, parking_yn=:parking_yn,"
         " slope_yn=:slope_yn, subway_yn=:subway_yn, bus_stop_yn=:bus_stop_yn,"
         " wheelchair_rent_yn=:wheelchair_rent_yn, tactile_map_yn=:tactile_map_yn,"
@@ -355,17 +379,52 @@ def upsert_tour_bf(rows: List[dict]) -> int:
         " base_dt=CAST(:base_dt AS date), updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
         " WHERE fclt_id=:fclt_id"
     )
+    scope_sql = text(
+        "SELECT fclt_id, fclt_name FROM " + table +
+        " WHERE del_yn='N' AND sido_code=:sido_code"
+        "   AND (addr_road LIKE :prefix OR addr_jibun LIKE :prefix)"
+    )
+    delete_sql = text(
+        "UPDATE " + table + " SET del_yn='Y', deleted_at=CURRENT_TIMESTAMP,"
+        " deleted_by=:created_by, updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
+        " WHERE fclt_id IN :ids"
+    ).bindparams(bindparam('ids', expanding=True))
+
+    def _in_scope(row: dict) -> bool:
+        return bool(addr_filter) and any(
+            str(a or '').startswith(addr_filter) for a in (row.get('addr_road'), row.get('addr_jibun')))
+
+    sido_codes = {r['sido_code'] for r in rows}
     count = 0
+    touched = set()
     with engine.begin() as conn:
+        legacy = {}
+        if addr_filter:
+            for sido in sido_codes:
+                for _id, name in conn.execute(scope_sql, {'sido_code': sido, 'prefix': addr_filter + '%'}):
+                    legacy[_id] = name
         for row in rows:
             params = dict(row, created_by=CREATED_BY)
             found = conn.execute(select_sql, params).fetchone()
             if found:
                 params['fclt_id'] = found[0]
                 conn.execute(update_sql, params)
+                touched.add(found[0])
             else:
-                conn.execute(insert_sql, params)
+                touched.add(conn.execute(insert_sql, params).scalar())
             count += 1
+
+        stale = sorted(i for i in legacy if i not in touched)
+        in_scope = sum(1 for r in rows if _in_scope(r))
+        if stale and legacy and in_scope < len(legacy) * TOUR_BF_MIN_RATIO:
+            logger.warning(
+                '%s: 범위(%s) 안 수집 %d건이 기존 활성 %d건의 %.0f%% 미만 — 원천 일부 장애로 보고 '
+                '논리삭제 %d건을 보류', table, addr_filter, in_scope, len(legacy),
+                TOUR_BF_MIN_RATIO * 100, len(stale))
+        elif stale:
+            conn.execute(delete_sql, {'ids': stale, 'created_by': CREATED_BY})
+            logger.info('%s: 원천에서 사라진 %d건 논리삭제 — %s', table, len(stale),
+                        ', '.join(legacy[i] for i in stale[:10]))
     return count
 
 
