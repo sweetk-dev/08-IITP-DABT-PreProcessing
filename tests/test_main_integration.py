@@ -243,14 +243,19 @@ class CollectIsolationTests(unittest.TestCase):
             saved = main_module.save_all_files({}, self.STATS, {}, {})
         self.assertEqual(len(saved), 2)
 
-    def _run_main(self, mode, db_result=None):
-        """main() 을 외부 의존(DB·네트워크·로그 파일) 없이 실행하고 (종료코드, 요약, DB 호출 인자)를 돌려준다."""
+    def _run_main(self, mode, db_result=None, scope='ALL'):
+        """main() 을 외부 의존(DB·네트워크·로그 파일) 없이 실행하고 (종료코드, 요약, DB 호출 인자)를 돌려준다.
+
+        실행 기록·알림(ops_alert.record_and_notify) 호출은 self.alert_calls 에 (args, kwargs) 로 모인다.
+        """
         captured = {}
+        self.alert_calls = []
         db_calls = []
 
-        def fake_db(saved, api_info, stats_src_list, info, collect_failed=None):
+        def fake_db(saved, api_info, stats_src_list, info, collect_failed=None, update_system_sync=True):
             db_calls.append({'saved': [s['stat_tbl_id'] for s in saved],
-                             'collect_failed': list(collect_failed or [])})
+                             'collect_failed': list(collect_failed or []),
+                             'update_system_sync': update_system_sync})
             return db_result if db_result is not None else {
                 'succeeded': [s['stat_tbl_id'] for s in saved], 'failed': []}
 
@@ -261,14 +266,16 @@ class CollectIsolationTests(unittest.TestCase):
         with patch.object(main_module, 'setup_logging'), \
                 patch.object(main_module, 'parse_args', return_value=_Args), \
                 patch.object(main_module, 'check_required_env_and_args'), \
-                patch.object(main_module, 'get_data_collection_scope', return_value='ALL'), \
+                patch.object(main_module, 'get_data_collection_scope', return_value=scope), \
                 patch.object(main_module, 'get_filtered_stats_src_list',
                              return_value=({'ext_api_id': 1}, self.STATS, None)), \
                 patch.object(main_module, 'prepare_data_directories', return_value={'ext_sys': 'KOSIS'}), \
                 patch.object(main_module, 'get_stats_src_data_info', return_value={}), \
                 patch.object(main_module, 'save_single_file', side_effect=self._fake_save_single_file), \
                 patch.object(main_module, 'process_db_insertion', side_effect=fake_db), \
-                patch.object(main_module, 'write_run_summary', side_effect=captured.update):
+                patch.object(main_module, 'write_run_summary', side_effect=captured.update), \
+                patch.object(main_module.ops_alert, 'record_and_notify',
+                             side_effect=lambda *a, **k: self.alert_calls.append((a, k))):
             with self.assertRaises(SystemExit) as cm:
                 main_module.main()
         return cm.exception.code, captured, db_calls

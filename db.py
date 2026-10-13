@@ -103,9 +103,19 @@ def get_stats_src_api_info(ext_api_id):
             db_logger.warning("ext_api_id가 없어 통계 소스 정보를 조회할 수 없습니다.")
             return []
         
-        query = text("""
+        # intg_col_map(통합 테이블 칸 배치 규칙, 01 v1.9.0)은 칼럼이 있을 때만 읽는다.
+        # 01 마이그레이션 전 DB 에서도 배치가 그대로 돌게 하기 위해서다(없으면 전 통계 NULL = 종전 규칙).
+        has_col_map = bool(session.execute(text("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'sys_stats_src_api_info' AND column_name = 'intg_col_map'
+        """)).first())
+        if not has_col_map:
+            db_logger.warning("sys_stats_src_api_info.intg_col_map 칼럼 없음 — 01 v1.9.0 미적용, 종전 칸 배치 규칙으로 진행")
+        col_map_sql = "intg_col_map::text AS intg_col_map" if has_col_map else "NULL AS intg_col_map"
+        query = text(f"""
             SELECT stat_api_id, ext_api_id, status, del_yn, stat_title, stat_tbl_id,
-                   use_base_url_yn, api_data_url, api_meta_url, api_latest_chn_dt_url
+                   use_base_url_yn, api_data_url, api_meta_url, api_latest_chn_dt_url,
+                   {col_map_sql}
             FROM sys_stats_src_api_info 
             WHERE ext_api_id = :ext_api_id AND del_yn = 'N' AND status = 'A'
             ORDER BY stat_api_id
@@ -126,7 +136,10 @@ def get_stats_src_api_info(ext_api_id):
                 'use_base_url_yn': row.use_base_url_yn,
                 'api_data_url': row.api_data_url,
                 'api_meta_url': row.api_meta_url,
-                'api_latest_chn_dt_url': row.api_latest_chn_dt_url
+                'api_latest_chn_dt_url': row.api_latest_chn_dt_url,
+                # JSON 텍스트(또는 None). 해석·검증은 적재 단계(db_processing.parse_intg_col_map)가 한다 —
+                # 잘못된 규칙이면 그 통계만 실패시키고 나머지는 계속 진행하기 위해서다.
+                'intg_col_map': row.intg_col_map,
             }
             stats_src_list.append(stats_src)
         

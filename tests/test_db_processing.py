@@ -220,6 +220,9 @@ META_XML = (
     '<objIdSn>1</objIdSn><unitNm>명</unitNm></MetaRow>'
     '<MetaRow><objId>A</objId><objNm>구분</objNm><itmId>A1</itmId><itmNm>전체</itmNm>'
     '<objIdSn>2</objIdSn></MetaRow>'
+    # 데이터의 분류 코드(A1·A2)가 모두 메타에 있어야 한다 — 적재 끝에 메타 무결성을 확인한다(v1.17.0).
+    '<MetaRow><objId>A</objId><objNm>구분</objNm><itmId>A2</itmId><itmNm>세부</itmNm>'
+    '<objIdSn>3</objIdSn></MetaRow>'
     '</Structures>'
 )
 
@@ -371,12 +374,16 @@ class KosisLoadDbTests(unittest.TestCase):
             'src_data_id': self.src_data_id[stat_tbl_id], 'ext_sys': 'KOSIS',
         }
 
-    def _run(self, responses, collect_failed=None, **file_kwargs):
-        """responses: {stat_tbl_id: data 응답}. process_db_insertion 을 실제로 실행한다."""
+    def _run(self, responses, collect_failed=None, col_maps=None, **file_kwargs):
+        """responses: {stat_tbl_id: data 응답}. process_db_insertion 을 실제로 실행한다.
+
+        col_maps: {stat_tbl_id: intg_col_map(JSON 문자열/dict)} — 통합 테이블 칸 배치 규칙(v1.17.0).
+        """
         saved = [self._file_info(s, d, **file_kwargs) for s, d in responses.items()]
         api_info = {'ext_api_id': self.ext_api_id}
         stats_src_list = [{'stat_tbl_id': s, 'ext_api_id': self.ext_api_id,
-                           'stat_api_id': self.stat_api_id[s]} for s in STATS]
+                           'stat_api_id': self.stat_api_id[s],
+                           'intg_col_map': (col_maps or {}).get(s)} for s in STATS]
         info = {s: {'intg_tbl_id': intg, 'src_data_id': self.src_data_id[s]} for s, intg in STATS.items()}
         return db_processing.process_db_insertion(saved, api_info, stats_src_list, info,
                                                   collect_failed=collect_failed)
@@ -406,6 +413,120 @@ class KosisLoadDbTests(unittest.TestCase):
                     "UPDATE " + tbl + " SET created_at = created_at - make_interval(days => :d)"
                     " WHERE src_data_id = :s"), {'d': days, 's': sid})
 
+
+    # --- (v1.17.0) KOSIS 구조 변경 대응 — 칸 배치 규칙·모양 가드·메타 무결성 -----------
+    # KOSIS 가 예전 "항목"(성별)을 "분류"로 옮긴 상황을 재현한다.
+    #   예전 응답: C1=구분(A1·A2), ITM_ID=성별(T001 계·T002 남자)
+    #   새 응답  : C1=구분, C2=성별(T001·T002), ITM_ID=T1(인원) 1개
+    # 규칙 {"c2": null, "itm_id": "C2", "item_obj": "D"} 를 쓰면 통합 테이블은 예전과 같은 모양이어야 한다.
+    PIVOT_RULE = {'c2': None, 'itm_id': 'C2', 'item_obj': 'D'}
+    PIVOT_META = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<Structures>'
+        '<MetaRow><objId>ITEM</objId><objNm>항목</objNm><itmId>T1</itmId><itmNm>인원</itmNm></MetaRow>'
+        '<MetaRow><objId>A</objId><objNm>구분</objNm><itmId>A1</itmId><itmNm>전체</itmNm></MetaRow>'
+        '<MetaRow><objId>A</objId><objNm>구분</objNm><itmId>A2</itmId><itmNm>세부</itmNm></MetaRow>'
+        '<MetaRow><objId>D</objId><objNm>성별</objNm><itmId>T001</itmId><itmNm>계</itmNm></MetaRow>'
+        '<MetaRow><objId>D</objId><objNm>성별</objNm><itmId>T002</itmId><itmNm>남자</itmNm></MetaRow>'
+        '</Structures>')
+    OLD_META = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<Structures>'
+        '<MetaRow><objId>ITEM</objId><objNm>항목</objNm><itmId>T001</itmId><itmNm>계</itmNm></MetaRow>'
+        '<MetaRow><objId>ITEM</objId><objNm>항목</objNm><itmId>T002</itmId><itmNm>남자</itmNm></MetaRow>'
+        '<MetaRow><objId>A</objId><objNm>구분</objNm><itmId>A1</itmId><itmNm>전체</itmNm></MetaRow>'
+        '<MetaRow><objId>A</objId><objNm>구분</objNm><itmId>A2</itmId><itmNm>세부</itmNm></MetaRow>'
+        '</Structures>')
+
+    @staticmethod
+    def _old_shape(years=(2021, 2022, 2023)):
+        return [{'TBL_ID': 'ITEST_DT_A', 'PRD_DE': str(y), 'DT': '7', 'C1': c, 'ITM_ID': g, 'UNIT_NM': '명'}
+                for y in years for c in ('A1', 'A2') for g in ('T001', 'T002')]
+
+    @staticmethod
+    def _new_shape(years=(2021, 2022, 2023, 2024), dt='7'):
+        return [{'TBL_ID': 'ITEST_DT_A', 'PRD_DE': str(y), 'DT': dt, 'C1': c, 'C1_OBJ_NM': '구분',
+                 'C2': g, 'C2_OBJ_NM': '성별', 'ITM_ID': 'T1', 'UNIT_NM': '명'}
+                for y in years for c in ('A1', 'A2') for g in ('T001', 'T002')]
+
+    def _intg_keys(self):
+        with self.engine.begin() as conn:
+            return sorted(tuple(r) for r in conn.execute(self.text(
+                "SELECT prd_de, c1, COALESCE(c2,''), itm_id FROM " + INTG_A + " WHERE src_data_id = :s"),
+                {'s': self.src_data_id['ITEST_DT_A']}))
+
+    def test_pivot_rule_keeps_legacy_shape_and_remaps_meta(self):
+        self._run({'ITEST_DT_A': self._old_shape()}, meta=self.OLD_META)
+        before = self._intg_keys()
+        result = self._run({'ITEST_DT_A': self._new_shape()}, meta=self.PIVOT_META,
+                           col_maps={'ITEST_DT_A': self.PIVOT_RULE}, latest='2026-08-24')
+        self.assertEqual(result['failed'], [])
+        after = self._intg_keys()
+        # 예전 연도 키는 그대로, 새 연도(2024)만 같은 모양으로 늘었다
+        self.assertEqual([k for k in after if k[0] != 2024], before)
+        self.assertEqual(sorted({k[3] for k in after}), ['T001', 'T002'])
+        self.assertEqual({k[2] for k in after}, {''})
+        with self.engine.begin() as conn:
+            meta = conn.execute(self.text(
+                "SELECT obj_id, obj_nm, itm_id, itm_nm FROM stats_kosis_metadata_code"
+                " WHERE src_data_id = :s AND obj_nm = '항목' ORDER BY itm_id"),
+                {'s': self.src_data_id['ITEST_DT_A']}).all()
+            info = conn.execute(self.text(
+                "SELECT collect_end_dt, avail_cat_cols FROM stats_src_data_info WHERE src_data_id = :s"),
+                {'s': self.src_data_id['ITEST_DT_A']}).one()
+        self.assertEqual([tuple(m) for m in meta], [('ITEM', '항목', 'T001', '계'), ('ITEM', '항목', 'T002', '남자')])
+        self.assertEqual(info[0], '2024')               # 수집 종료연도가 받은 마지막 연도로 앞당겨졌다
+        self.assertEqual(json.loads(info[1]), ['c1'])  # 통합 테이블에 값이 들어간 분류 칸만
+
+    def test_new_structure_without_rule_is_blocked_and_preserved(self):
+        """규칙 없이 새 구조를 받으면(주소만 고친 상황) 키가 맞지 않아 멈추고 기존 행을 지킨다."""
+        self._run({'ITEST_DT_A': self._old_shape()}, meta=self.OLD_META)
+        before = self._intg_keys()
+        result = self._run({'ITEST_DT_A': self._new_shape()}, meta=self.PIVOT_META)
+        self.assertEqual([f[0] for f in result['failed']], ['ITEST_DT_A'])
+        self.assertIn('키가 일치', result['failed'][0][1])
+        self.assertEqual(self._intg_keys(), before)
+
+    def test_accept_reshape_env_allows_one_off_reload(self):
+        self._run({'ITEST_DT_A': self._old_shape()}, meta=self.OLD_META)
+        with patch.dict(os.environ, {'KOSIS_ACCEPT_RESHAPE': 'ITEST_DT_A'}):
+            result = self._run({'ITEST_DT_A': self._new_shape()}, meta=self.PIVOT_META)
+        self.assertEqual(result['failed'], [])
+        self.assertEqual({k[3] for k in self._intg_keys()}, {'T1'})
+
+    def test_missing_existing_year_is_blocked(self):
+        self._run({'ITEST_DT_A': self._old_shape()}, meta=self.OLD_META)
+        result = self._run({'ITEST_DT_A': self._new_shape(years=(2022, 2023, 2024))}, meta=self.PIVOT_META,
+                           col_maps={'ITEST_DT_A': self.PIVOT_RULE})
+        self.assertIn('기존 연도 2021', result['failed'][0][1])
+        self.assertEqual(len(self._intg_keys()), 12)
+
+    def test_code_missing_in_meta_rolls_back(self):
+        """메타에 이름이 없는 코드가 생기면(공개 API 오류 원인) 적재 전체를 되돌린다."""
+        self._run({'ITEST_DT_A': self._old_shape()}, meta=self.OLD_META)
+        bad_meta = self.PIVOT_META.replace(
+            '<MetaRow><objId>D</objId><objNm>성별</objNm><itmId>T002</itmId><itmNm>남자</itmNm></MetaRow>', '')
+        result = self._run({'ITEST_DT_A': self._new_shape()}, meta=bad_meta,
+                           col_maps={'ITEST_DT_A': self.PIVOT_RULE})
+        self.assertIn('항목 코드 1건(T002)', result['failed'][0][1])
+        self.assertEqual(len(self._intg_keys()), 12)
+
+    def test_bad_rule_fails_only_that_statistic(self):
+        result = self._run({'ITEST_DT_A': self._new_shape(), 'ITEST_DT_B': _rows('ITEST_DT_B')},
+                           meta=self.PIVOT_META, col_maps={'ITEST_DT_A': {'itm_id': 'C2'}})
+        self.assertEqual([f[0] for f in result['failed']], ['ITEST_DT_A'])
+        self.assertIn('item_obj 를 지정해야 함', result['failed'][0][1])
+        self.assertEqual(result['succeeded'], ['ITEST_DT_B'])
+
+    def test_partial_scope_does_not_touch_system_sync_time(self):
+        saved = [self._file_info('ITEST_DT_A', _rows('ITEST_DT_A'))]
+        stats_src_list = [{'stat_tbl_id': s, 'ext_api_id': self.ext_api_id,
+                           'stat_api_id': self.stat_api_id[s]} for s in STATS]
+        info = {s: {'intg_tbl_id': i, 'src_data_id': self.src_data_id[s]} for s, i in STATS.items()}
+        result = db_processing.process_db_insertion(saved, {'ext_api_id': self.ext_api_id}, stats_src_list,
+                                                    info, update_system_sync=False)
+        self.assertEqual(result['failed'], [])
+        self.assertIsNotNone(self._sync_time('ITEST_DT_A'))
+        self.assertIsNone(self._sync_time())
+
     # --- (1) 정상 응답 2회 연속 ---------------------------------------------
     def test_same_day_rerun_keeps_single_copy(self):
         rows = _rows('ITEST_DT_A')
@@ -414,7 +535,7 @@ class KosisLoadDbTests(unittest.TestCase):
             self.assertEqual(result['failed'], [])
         self.assertEqual(self._count(INTG_A, 'ITEST_DT_A'), len(rows))
         self.assertEqual(self._count('stats_kosis_origin_data', 'ITEST_DT_A'), len(rows))
-        self.assertEqual(self._count('stats_kosis_metadata_code', 'ITEST_DT_A'), 2)
+        self.assertEqual(self._count('stats_kosis_metadata_code', 'ITEST_DT_A'), 3)  # 메타 행 3개(항목 1 + 분류 2)
 
     def test_next_day_rerun_with_same_update_date_keeps_single_copy(self):
         """갱신일이 그대로인 통계를 다른 날 다시 적재해도 통합 테이블은 응답 행 수와 같다."""
@@ -434,7 +555,7 @@ class KosisLoadDbTests(unittest.TestCase):
         result = self._run({'ITEST_DT_A': newer}, latest='2025-09-01')
         self.assertEqual(result['failed'], [])
         self.assertEqual(self._count(INTG_A, 'ITEST_DT_A'), len(newer))
-        self.assertEqual(self._count('stats_kosis_metadata_code', 'ITEST_DT_A'), 2)
+        self.assertEqual(self._count('stats_kosis_metadata_code', 'ITEST_DT_A'), 3)  # 메타 행 3개(항목 1 + 분류 2)
         with self.engine.begin() as conn:
             dates = conn.execute(self.text(
                 "SELECT DISTINCT src_latest_chn_dt::text FROM " + INTG_A + " WHERE src_data_id = :s"),

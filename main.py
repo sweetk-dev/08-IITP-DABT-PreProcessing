@@ -16,6 +16,7 @@ from collectors.korail_conv import KorailConvCollector
 from collectors.kowsi_facl import KowsiFaclCollector
 from collectors.tour_bf import TourBfCollector
 from mobility_pipeline import MOBILITY_EXT_SYS, run_mobility
+import ops_alert
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -28,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # preserved: with ext_sys defaulting to 'KOSIS', the legacy save path and the
 # collector behavior are identical to v1.4.0.
 # ============================================================================
-__version__ = "1.16.4"
+__version__ = "1.17.0"
 
 
 
@@ -359,7 +360,8 @@ def save_all_files(api_info, stats_src_list, dirs, stats_src_data_info_dict, fai
                 result = future.result()
             except Exception as e:
                 # 상세 원인·트레이스백은 save_single_file 이 이미 로그에 남겼다. 여기서는 집계만 한다.
-                reason = _short_reason(e)
+                # 사유는 요약 로그·알림 메일·운영 콘솔에 함께 쓰인다. KOSIS 오류 코드 안내가 잘리지 않게 200자까지 둔다.
+                reason = _short_reason(e, limit=200)
                 logging.error(f"[{stat_tbl_id}] 수집 실패 — 이 통계만 건너뛰고 계속 진행: {reason}")
                 if failed_out is not None:
                     failed_out.append((stat_tbl_id, reason))
@@ -395,6 +397,11 @@ def main():
         'status': 'ERROR', 'error': None,
     }
     exit_code = 1
+    # 실행 기록·이상 알림(ops_alert)에 넘길 값. try 안에서 채운다.
+    #   alert_failures: [{'id', 'stage'('collect'|'db'), 'reason'}] — 메일·운영 콘솔의 실패 목록
+    #   alert_titles  : {통계표 ID: 통계명} — 메일에 이름을 함께 싣는다
+    #   run_scope     : 'ALL' | 'PARTIAL' — 일부 통계 수동 실행은 알리지 않는다
+    alert_failures, alert_titles, run_scope = [], {}, 'ALL'
     try:
         args = parse_args()
         summary['mode'] = args.mode
@@ -412,9 +419,17 @@ def main():
             summary['db_fail'] = mob['db_fail']
             summary['status'] = 'SUCCESS'
             exit_code = 0
+            if mob.get('db_fail'):
+                # 적재 실패 건이 있으면 KOSIS 와 같은 규약(실패가 1건이라도 있으면 부분 완료, 종료코드 2)을 쓴다.
+                # SUCCESS 로 두면 기록·알림이 이 실행을 성공으로 보고, 직전이 실패였다면 정상화 메일까지 나간다.
+                summary['status'] = 'PARTIAL'
+                exit_code = 2
+                alert_failures.append({'id': ext_sys, 'stage': 'db',
+                                       'reason': f"적재 실패 {mob['db_fail']}건(상세는 서버 로그)"})
             logging.info("이동편의 수집 파이프라인 완료 (ext_sys=%s)", ext_sys)
         else:
             data_collection_scope = get_data_collection_scope()
+            run_scope = data_collection_scope
             if data_collection_scope not in ALLOWED_DATA_COLLECTION_SCOPES:
                 raise ValueError(
                     "DATA_COLLECTION_SCOPE 는 ALL 또는 PARTIAL 만 가능합니다. (현재: %s)" % data_collection_scope
@@ -423,6 +438,7 @@ def main():
             dirs = prepare_data_directories(ext_sys=ext_sys)
             # dirs['ext_sys'] 는 create_data_save_directory 에서 이미 정규화되어 채워짐.
             stat_tbl_id_list = [s['stat_tbl_id'] for s in stats_src_list]
+            alert_titles = {str(s['stat_tbl_id']): s.get('stat_title') or '' for s in stats_src_list}
             summary['targets'] = len(stat_tbl_id_list)
             ext_api_id = stats_src_list[0]['ext_api_id'] if stats_src_list else None
             stats_src_data_info_dict = get_stats_src_data_info(ext_api_id, stat_tbl_id_list)
@@ -447,6 +463,8 @@ def main():
                 db_result = process_db_insertion(
                     saved_files_info, api_info, stats_src_list, stats_src_data_info_dict,
                     collect_failed=collect_failed,
+                    # 일부 통계만 돌린 실행(PARTIAL)은 외부 시스템 전체 동기화 시각을 갱신하지 않는다.
+                    update_system_sync=(data_collection_scope == 'ALL'),
                 )
                 summary['db_ok'] = len(db_result.get('succeeded', []))
                 failed = db_result.get('failed', [])
@@ -455,6 +473,11 @@ def main():
                     error_parts.append(
                         _format_failures('db_fail', [(f[0], _short_reason(Exception(f[1]))) for f in failed])
                     )
+
+            # 실행 기록·알림용 실패 목록. 메일에 싣는 사유는 요약 로그(120자)보다 길게 300자까지 둔다.
+            alert_failures.extend({'id': sid, 'stage': 'collect', 'reason': r} for sid, r in collect_failed)
+            alert_failures.extend({'id': f[0], 'stage': 'db', 'reason': _short_reason(Exception(f[1]), limit=300)}
+                                  for f in failed)
 
             # 종료 코드 규약: 0 성공 / 2 일부 통계 실패(부분 완료) / 1 치명적 오류.
             # 수집 실패도 적재 실패와 같이 "일부 통계 실패"로 본다 — 실패가 1건이라도 있으면 0 이 아니다.
@@ -509,6 +532,9 @@ def main():
             write_run_summary(summary)
         except Exception as _e:
             logging.error(f"run-summary 기록 실패: {_e}")
+        # 실행 기록(sys_batch_run_log) + 이상·정상화 알림 메일. 이 단계의 실패는 종료 코드에 영향을 주지 않는다
+        # (record_and_notify 가 모든 예외를 잡아 로그로만 남긴다).
+        ops_alert.record_and_notify(summary, alert_failures, run_scope=run_scope, titles=alert_titles)
 
     sys.exit(exit_code)
 
