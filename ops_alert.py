@@ -79,6 +79,7 @@ JOB_LABELS = {
     'KOWSI_FACL': '건물 편의시설 수집',
     'TOUR_BF_API': '무장애 관광지 수집',
     'GG_TOILET': '경기 공중화장실 수집',
+    'GG_CULTURE': '경기 문화·체육 시설 수집',
 }
 
 _STAGE_LABELS = {'collect': '수집', 'db': '적재', 'batch': '배치'}

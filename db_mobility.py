@@ -14,6 +14,7 @@
 - poi_tour_bf_facility         (TOUR_BF_API)   자연키 없음 → (fclt_name, sido_code) 조회 후 UPDATE/INSERT / 범위 안 사라진 행 논리삭제
 - poi_public_toilet_info       (GG_TOILET)     자연키 없음 → (이름+주소) 매칭 UPDATE / 미매칭 INSERT / 사라진 행 논리삭제
 - poi_emergency_support        (GG_ASSIST_REPAIR) ON CONFLICT (support_type, name, coalesce(addr_road,''))
+- poi_culture_sports_facility  (GG_CULTURE)    자연키 없음 → 종류별 (이름+주소) 매칭 UPDATE / 되살림 / INSERT / 논리삭제, 종류별 트랜잭션
 
 created_by 는 DB 공통코드(sys_work_type) 시드 정본 'SYS-BACH' 를 따른다.
 """
@@ -668,3 +669,201 @@ def upsert_public_toilets(rows: List[dict]) -> int:
     """mobility_pipeline 디스패치용 — 적재 행 수(갱신+신규)를 돌려준다."""
     summary = sync_public_toilets(rows)
     return summary['matched'] + summary['inserted']
+
+
+# ============================================================================
+# poi_culture_sports_facility — 경기 문화·체육 시설 4종 (GG_CULTURE, 2026-10-14)
+# ============================================================================
+
+# 적재 대상 테이블 — 통합 테스트가 임시 테이블로 바꿔 끼운다.
+CULTURE_TABLE = 'poi_culture_sports_facility'
+
+# 급감 방어: 한 번에 논리삭제될 행이 max(CULTURE_DROP_MIN_ABS, 기존 활성 × CULTURE_DROP_MAX_RATIO)
+# 를 넘으면 원천 장애(부분 응답)로 보고 그 종류의 적재를 중단한다.
+#   · 비율만 쓰면 5건짜리 종류는 1곳만 문을 닫아도(20%) 매번 중단된다 → 절대 하한 3건을 둔다.
+#   · 절대 건수만 쓰면 32건짜리 종류가 1건으로 줄어도(31건 삭제) 성공으로 끝난다 → 비율 상한 30%.
+#   예) 5건 → 3곳까지 삭제 허용, 32건 → 9곳, 260건 → 78곳.
+# 실제로 대량 정리된 것이 맞으면 GG_CULTURE_ACCEPT_DROP=<종류>[,<종류>] 를 붙여 수동 실행한다.
+CULTURE_DROP_MIN_ABS = 3
+CULTURE_DROP_MAX_RATIO = 0.3
+
+CULTURE_COLUMNS = (
+    'sido_code', 'sigun_cd', 'sigun_nm', 'name', 'addr_road', 'addr_jibun', 'zip_code',
+    'latitude', 'longitude', 'tel', 'homepage', 'install_report_dt', 'corp_name', 'source',
+)
+
+
+def _norm_name(value) -> str:
+    """이름 매칭 키 — 공백·가운뎃점·하이픈 차이만 무시한다.
+
+    괄호 안은 지우지 않는다. 공공시설은 '희망도서관(본관)'·'희망도서관(분관)' 처럼 괄호로 서로 다른
+    시설을 구분하는 일이 많아, 지우면 다른 시설을 같은 시설로 이어 붙이게 된다.
+    """
+    import re
+    return re.sub(r'[\s·\-]+', '', str(value or ''))
+
+
+def culture_match_keys(name, addr_road, addr_jibun) -> list:
+    """(정규화 이름, 정규화 도로명) 과 (정규화 이름, 정규화 지번). 둘 중 하나만 같아도 같은 시설로 본다.
+
+    주소가 둘 다 없으면 (정규화 이름, '') 하나를 돌려준다 — DB 부분 유니크 인덱스가
+    coalesce(addr_road, addr_jibun, '') 로 같은 키를 만들기 때문이다. 키가 없으면 매번 신규로
+    분류돼 기존 활성 행과 유일성 제약에서 충돌한다.
+    """
+    n = _norm_name(name)
+    if not n:
+        return []
+    keys = []
+    for addr in (addr_road, addr_jibun):
+        a = _norm_addr(addr)
+        if a:
+            keys.append((n, a))
+    if not keys:
+        keys.append((n, ''))
+    return keys
+
+
+def _sync_culture_type(conn, facility_type: str, rows: List[dict]) -> dict:
+    """한 종류를 동기화한다(호출자가 트랜잭션을 연다). 반환 {'matched','revived','inserted','deleted'}.
+
+    매칭 순서
+      1) (이름, 주소) 가 같은 활성 행 → 제자리 UPDATE
+      2) (이름, 주소) 가 같은 논리삭제 행 → 되살림 UPDATE(del_yn='N', facility_id 유지)
+      3) 이름만 같고 양쪽 모두 짝이 하나뿐 → 주소가 바뀐 같은 시설로 보고 UPDATE
+         (원천의 주소 정정·도로명 부여로 행이 끊기는 것을 막는다. 동명 시설이 둘 이상이면 하지 않는다)
+      나머지 신규 → INSERT, 짝을 못 찾은 기존 활성 행 → 논리삭제
+    적용 순서는 논리삭제 → UPDATE → INSERT 다. 활성 행 부분 유니크 인덱스가 문장마다 검사되므로,
+    사라진 행이 키를 쥐고 있는 상태에서 다른 행이 같은 키로 바뀌면 충돌하기 때문이다.
+    """
+    import os
+    from sqlalchemy import bindparam
+
+    table = CULTURE_TABLE
+    existing = conn.execute(text(
+        "SELECT facility_id, name, addr_road, addr_jibun, del_yn FROM " + table +
+        " WHERE facility_type=:t ORDER BY facility_id"), {'t': facility_type}).fetchall()
+    active = [r for r in existing if (r[4] or 'N') == 'N']
+
+    def build_index(candidates):
+        index, ambiguous = {}, set()
+        for fid, name, road, jibun, _ in candidates:
+            for key in culture_match_keys(name, road, jibun):
+                if key in index and index[key] != fid:
+                    ambiguous.add(key)
+                index.setdefault(key, fid)
+        for key in ambiguous:      # 같은 키를 가진 기존 행이 둘 이상이면 어느 쪽인지 모르므로 매칭하지 않는다
+            index.pop(key, None)
+        return index
+
+    active_idx = build_index(active)
+    deleted_idx = build_index([r for r in existing if (r[4] or 'N') != 'N'])
+
+    used = set()
+    plan = []            # (row, facility_id or None, kind)
+    for row in rows:
+        keys = culture_match_keys(row['name'], row.get('addr_road'), row.get('addr_jibun'))
+        hit = next((active_idx[k] for k in keys if k in active_idx and active_idx[k] not in used), None)
+        kind = 'matched'
+        if hit is None:
+            hit = next((deleted_idx[k] for k in keys if k in deleted_idx and deleted_idx[k] not in used), None)
+            kind = 'revived'
+        if hit is not None:
+            used.add(hit)
+        plan.append([row, hit, kind if hit is not None else None])
+
+    # 3) 이름만 같은 1:1 짝 — 주소 변경
+    left_new = {}
+    for item in plan:
+        if item[1] is None:
+            left_new.setdefault(_norm_name(item[0]['name']), []).append(item)
+    left_old = {}
+    for fid, name, *_ in active:
+        if fid not in used:
+            left_old.setdefault(_norm_name(name), []).append(fid)
+    moved = 0
+    for nname, items in left_new.items():
+        olds = left_old.get(nname, [])
+        if nname and len(items) == 1 and len(olds) == 1:
+            items[0][1], items[0][2] = olds[0], 'matched'
+            used.add(olds[0])
+            moved += 1
+
+    stale_ids = [r[0] for r in active if r[0] not in used]
+    # 급감 방어 — 매칭이 끝난 뒤 실제로 지워질 행 수로 판정한다(수집 건수만 보면 이름이 바뀐 행 등이 섞인다).
+    drop_limit = max(CULTURE_DROP_MIN_ABS, int(len(active) * CULTURE_DROP_MAX_RATIO))
+    accepted = {t.strip() for t in os.getenv('GG_CULTURE_ACCEPT_DROP', '').split(',') if t.strip()}
+    if len(stale_ids) > drop_limit and facility_type not in accepted:
+        raise RuntimeError('%s(%s): 논리삭제 예정 %d건이 허용 %d건(기존 활성 %d건)을 넘음 — 원천 장애로 보고 적재 중단.'
+                           ' 실제 정리가 맞으면 GG_CULTURE_ACCEPT_DROP=%s 로 수동 실행'
+                           % (table, facility_type, len(stale_ids), drop_limit, len(active), facility_type))
+    # install_report_dt 는 문자열('YYYY-MM-DD')로 오므로 CAST 를 붙여 따로 지정한다(같은 칸을 두 번 쓰지 않게 제외).
+    set_clause = ', '.join('%s=:%s' % (c, c) for c in CULTURE_COLUMNS if c != 'install_report_dt')
+    update_sql = text(
+        "UPDATE " + table + " SET " + set_clause + ", install_report_dt=CAST(:install_report_dt AS date),"
+        " del_yn='N', deleted_at=NULL, deleted_by=NULL,"
+        " updated_at=CURRENT_TIMESTAMP, updated_by=:created_by WHERE facility_id=:facility_id")
+    insert_cols = ('facility_type',) + CULTURE_COLUMNS
+    insert_sql = text(
+        "INSERT INTO " + table + " (" + ', '.join(insert_cols) + ", created_by) VALUES (" +
+        ', '.join('CAST(:install_report_dt AS date)' if c == 'install_report_dt' else ':' + c
+                  for c in insert_cols) + ", :created_by)")
+    delete_sql = text(
+        "UPDATE " + table + " SET del_yn='Y', deleted_at=CURRENT_TIMESTAMP, deleted_by=:created_by,"
+        " updated_at=CURRENT_TIMESTAMP, updated_by=:created_by WHERE facility_id IN :ids"
+    ).bindparams(bindparam('ids', expanding=True))
+
+    updates = [dict(r, facility_id=fid, created_by=CREATED_BY) for r, fid, k in plan if fid is not None]
+    inserts = [dict(r, facility_type=facility_type, created_by=CREATED_BY) for r, fid, k in plan if fid is None]
+    if stale_ids:
+        conn.execute(delete_sql, {'ids': stale_ids, 'created_by': CREATED_BY})
+    if updates:
+        conn.execute(update_sql, updates)
+    if inserts:
+        conn.execute(insert_sql, inserts)
+
+    result = {
+        'matched': sum(1 for _, fid, k in plan if fid is not None and k == 'matched'),
+        'revived': sum(1 for _, fid, k in plan if fid is not None and k == 'revived'),
+        'inserted': len(inserts),
+        'deleted': len(stale_ids),
+    }
+    logger.info('%s(%s): 기존 활성 %d행 → 갱신 %d(주소 변경 %d) · 되살림 %d · 신규 %d · 논리삭제 %d',
+                table, facility_type, len(active), result['matched'], moved, result['revived'],
+                result['inserted'], result['deleted'])
+    return result
+
+
+def sync_culture_facilities(rows: List[dict]) -> dict:
+    """poi_culture_sports_facility 동기화 — 종류별로 트랜잭션을 따로 연다(종류별 격리).
+
+    rows 에 없는 종류(수집 실패·0건)는 건드리지 않는다. 한 종류의 적재가 실패해도 다른 종류는
+    반영되며, 실패 종류는 failures 로 돌려준다.
+    반환: {'db_ok', 'db_fail', 'failures': [...], 'by_type': {종류: {...}}}
+    """
+    out = {'db_ok': 0, 'db_fail': 0, 'failures': [], 'by_type': {}}
+    if not rows:
+        logger.warning('%s: 수집 0건 — 적재를 건너뜀', CULTURE_TABLE)
+        return out
+    if engine is None:
+        raise RuntimeError('DB engine not configured (DB_URL)')
+    by_type: dict = {}
+    for row in rows:
+        by_type.setdefault(row['facility_type'], []).append(row)
+    for facility_type, part in by_type.items():
+        try:
+            with engine.begin() as conn:
+                res = _sync_culture_type(conn, facility_type, part)
+        except Exception as exc:     # 종류별 격리 — 이 종류만 롤백되고 다음 종류로 간다
+            logger.error('%s(%s) 적재 실패: %s', CULTURE_TABLE, facility_type, exc)
+            out['db_fail'] += len(part)
+            out['failures'].append({'id': 'GG_CULTURE:' + facility_type, 'stage': 'db',
+                                    'reason': ('적재 실패: %s' % exc)[:300]})
+            continue
+        out['by_type'][facility_type] = res
+        out['db_ok'] += res['matched'] + res['revived'] + res['inserted']
+    return out
+
+
+def upsert_culture_facilities(rows: List[dict]) -> dict:
+    """mobility_pipeline 디스패치용 — 종류별 결과 dict 를 그대로 돌려준다(실패 목록 포함)."""
+    return sync_culture_facilities(rows)

@@ -428,7 +428,13 @@ def main():
             summary['db_fail'] = mob['db_fail']
             summary['status'] = 'SUCCESS'
             exit_code = 0
-            if mob.get('db_fail'):
+            if mob.get('failures'):
+                # 종류별 격리 수집기(GG_CULTURE): 실패한 종류만 실패 목록에 싣고 나머지는 반영된 상태다.
+                summary['status'] = 'PARTIAL'
+                exit_code = 2
+                alert_failures.extend(mob['failures'])
+                summary['error'] = 'partial:' + ','.join(str(f.get('id')) for f in mob['failures'])[:300]
+            elif mob.get('db_fail'):
                 # 적재 실패 건이 있으면 KOSIS 와 같은 규약(실패가 1건이라도 있으면 부분 완료, 종료코드 2)을 쓴다.
                 # SUCCESS 로 두면 기록·알림이 이 실행을 성공으로 보고, 직전이 실패였다면 정상화 메일까지 나간다.
                 summary['status'] = 'PARTIAL'
