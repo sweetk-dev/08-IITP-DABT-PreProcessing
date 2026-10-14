@@ -19,6 +19,7 @@ import db_mobility
 from db import get_api_info
 from collectors.gbis import GbisCollector
 from collectors.gbis_lowfloor import GbisLowFloorCollector
+from collectors.gg_culture import GgCultureCollector
 from collectors.gg_toilet import GgToiletCollector
 from collectors.korail_conv import KorailConvCollector
 from collectors.kowsi_facl import KowsiFaclCollector
@@ -31,6 +32,7 @@ GENERIC_EXT_DATA_ROOT = 'ext_data'
 MOBILITY_COLLECTORS = {
     'GBIS': GbisCollector,
     'GBIS_LOWFLOOR': GbisLowFloorCollector,
+    'GG_CULTURE': GgCultureCollector,
     'GG_TOILET': GgToiletCollector,
     'KORAIL_CONV': KorailConvCollector,
     'KOWSI_FACL': KowsiFaclCollector,
@@ -42,6 +44,7 @@ MOBILITY_EXT_SYS = tuple(MOBILITY_COLLECTORS)
 _UPSERT_DISPATCH = {
     'GBIS': db_mobility.upsert_bus_routes,
     'GBIS_LOWFLOOR': db_mobility.update_bus_route_low_floor,
+    'GG_CULTURE': db_mobility.upsert_culture_facilities,
     'GG_TOILET': db_mobility.upsert_public_toilets,
     'KORAIL_CONV': db_mobility.upsert_station_access,
     'KOWSI_FACL': db_mobility.upsert_facilities,
@@ -105,9 +108,20 @@ def run_mobility(ext_sys: str, mode: str) -> dict:
         collector.save_response(raw_details, save_dir, 'raw_details.json')
 
     summary = {'targets': len(rows), 'files_ok': len(rows), 'db_ok': 0, 'db_fail': 0}
+    # 종류별로 격리해 수집하는 수집기(GG_CULTURE)는 실패한 종류를 collector.failures 에 남긴다.
+    # 실행 요약의 failures 로 옮겨 main.py 가 부분 완료(PARTIAL)·실패 목록으로 기록·알림한다.
+    summary['failures'] = list(getattr(collector, 'failures', None) or [])
     if mode == 'db':
         upsert = _UPSERT_DISPATCH[ext_sys]
-        summary['db_ok'] = upsert(rows)
+        result = upsert(rows)
+        if isinstance(result, dict):
+            # 종류별 동기화 결과(GG_CULTURE): 적재 성공 행·실패 행·종류별 실패 목록
+            summary['db_ok'] = result.get('db_ok', 0)
+            summary['db_fail'] = result.get('db_fail', 0)
+            summary['failures'].extend(result.get('failures') or [])
+            summary['by_type'] = result.get('by_type') or {}
+        else:
+            summary['db_ok'] = result
         logger.info('%s DB 적재 완료: %d행', ext_sys, summary['db_ok'])
         # 분할 수집 수집기(KOWSI_FACL)의 진행 상태는 적재가 끝난 지금 확정한다.
         #   - 위 upsert 가 예외를 올리면 이 줄에 도달하지 않으므로 상태가 전진하지 않고,
@@ -123,5 +137,10 @@ def run_mobility(ext_sys: str, mode: str) -> dict:
         _collect_gbis_stations(collector, rows, save_dir, mode, summary)
 
     if mode == 'db':
-        db_mobility.touch_latest_sync(ext_sys)
+        if summary['failures']:
+            # KOSIS 와 같은 규칙 — 실패한 종류가 있으면 '마지막 동기화 시각' 을 갱신하지 않는다.
+            # (갱신하면 운영 화면이 전부 최신인 것처럼 보인다)
+            logger.warning('%s: 실패 %d건 — 동기화 시각 갱신 보류', ext_sys, len(summary['failures']))
+        else:
+            db_mobility.touch_latest_sync(ext_sys)
     return summary
