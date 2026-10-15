@@ -14,6 +14,8 @@
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
 
+> v1.20.0 — 고용 파일데이터 **지난 판 보존**. 모든 행에 원천 판 기준일 `src_base_dt`(01 v1.12.0)를 적고, 연도 칸이 없는 9개 표는 표 전체 교체 대신 **같은 판의 행만** 바꾼다(지난 판은 남는다). 급감 방어는 직전 판과 견준다. 판 지정(`ODCLOUD_EMP_EDITION`)으로 연도 없는 표의 지난 판도 보충할 수 있다.
+
 > v1.19.0 — 공공데이터포털 **장애인 고용 파일데이터 14종** 정기 수집기 `ODCLOUD_EMP` 추가. 2025-07 에 한 번 넣고 멈춰 있던 `emp_dis_*` 표를, 포털이 파일데이터마다 자동으로 열어 주는 OpenAPI(odcloud)로 매월 확인해 새 판(기준일)이 올라오면 갱신한다. 판 추적은 기존 `sys_stats_src_api_info` 를 쓰고, 칸 대응표에 없는 칸이 나오면 말없이 버리지 않고 그 데이터셋만 실패시킨다. 01 v1.11.0 과 함께 적용한다. 아래 「장애인 고용 파일데이터 적재」 참고.
 
 > v1.17.1 — 한국관광공사 무장애여행 목록을 **법정동 코드**(경기 41 · 안양 만안구 171 · 동안구 173)로 조회. 옛 지역 코드(31·17)로는 새로 등록·수정된 장소가 빠져 수집 건수가 10 → 8건으로 줄고 있었다(법정동 코드 기준 35건). 적재 범위(`경기도 안양시`) 안에서 원천에서 사라진 장소는 논리삭제하되, 응답이 절반 미만이면 삭제를 보류한다. 설정은 `.env.example` 의 `TOUR_LDONG_*`·`TOUR_BF_ADDR_FILTER`.
@@ -258,11 +260,12 @@ python scripts/load_krna_station_csv.py --csv 국가철도공단_수도권1호�
 | 수도권1/4호선_승강장_정보 (15041192 / 15041194) | `poi_station_platform` | UPSERT (line, stn, platform_no) |
 | 수도권1/4호선_승강장이격거리 (15041514 / 15041517) | `poi_station_platform` gap_* | 승강장 단위 요약 UPDATE |
 
-## 장애인 고용 파일데이터 적재 (공공데이터포털 `ODCLOUD_EMP`, v1.19.0)
+## 장애인 고용 파일데이터 적재 (공공데이터포털 `ODCLOUD_EMP`, v1.19.0 · 판 보존 v1.20.0)
 
 공공데이터포털 파일데이터 14종을 포털의 자동 변환 OpenAPI(odcloud)로 수집해 `emp_dis_*` 표를 판(edition) 단위로 갱신한다.
 인증키는 공공데이터포털 일반 인증키(다른 data.go.kr 소스와 같은 키, 데이터셋별 활용신청 필요)이며 01 v1.11.0 마이그레이션이
-기존 행에서 복사해 `sys_ext_api_info` 에 넣는다. 먼저 01 v1.11.0(`emp_odcloud_collect_v1110.sql`)을 적용해야 한다.
+기존 행에서 복사해 `sys_ext_api_info` 에 넣는다. 먼저 01 v1.11.0(`emp_odcloud_collect_v1110.sql`)과 v1.12.0(`emp_src_base_dt_v1120.sql` —
+행마다 판 기준일 칸 `src_base_dt`)을 적용해야 한다. v1.12.0 이 없으면 표 정의 검사에서 그 표가 실패한다.
 
 ```bash
 python main.py --mode file --ext-sys ODCLOUD_EMP   # 수집·칸 검사·변환 + "무엇이 바뀔지" 계산만(DB 쓰기 없음)
@@ -274,28 +277,30 @@ python main.py --mode db   --ext-sys ODCLOUD_EMP   # 판이 바뀐 표만 적재
 - 수집: 1,000행씩 받아 받은 행 수가 응답의 `totalCount` 와 같은지 확인. 원본은 `ext_data/ODCLOUD_EMP/<날짜>/<표>_<기준일>.json` 에 남긴다
 - 칸 검사: `collectors/odcloud_emp.py` 의 대응표(`DATASETS`)로 원천 칸(한글) → 표 칸을 맞춘다. 판마다 바뀐 칸 이름은 대응표에 함께 적는다. 필수 칸이 없거나 **대응표에 없는 칸이 나오면 그 표는 실패**(새 정보를 말없이 버리지 않는다)
 - 값 변환: 날짜(여러 형식)·숫자(쉼표, `12.0`)·O/X → 참/거짓·빈 값 → NULL. NOT NULL 칸에서 변환이 안 되면 그 표 실패
+- 판 보존: 모든 행에 그 행을 넣은 판의 기준일(`src_base_dt`)을 적는다. 연도 없는 표는 **같은 판의 행만** 지우고 넣어 지난 판이 남고, 연도 표는 판에 실린 연도만 바꾼다(연도마다 어느 판에서 왔는지 남는다). 판을 모르는 옛 행(`src_base_dt` NULL)은 지우지 않는다
 - 적재: 표 1개 = 트랜잭션 1개. 적재 후 `sys_stats_src_api_info`(판·시각), `sys_data_summary_info`(`src_latest_chn_dt` = 기준일, `sys_data_ref_dt` = 적재일)를 같은 트랜잭션에서 갱신
-- 급감 방어: 새 행이 바꿔치울 기존 행의 50% 미만이면 그 표 중단 → 확인 뒤 `ODCLOUD_EMP_ACCEPT_DROP=<표>` 로 수동 실행
+- 급감 방어: 새 행이 비교 대상의 50% 미만이면 그 표 중단 → 확인 뒤 `ODCLOUD_EMP_ACCEPT_DROP=<표>` 로 수동 실행. 비교 대상은 연도 없는 표는 직전 판(같은 판을 다시 넣으면 그 판), 연도 표는 판에 실린 연도의 기존 행(합계·연도마다)
 - 격리: 한 표의 실패는 그 표만 건너뛰고 부분 완료(종료코드 2)·알림. 전체 동기화 시각(`sys_ext_api_info.latest_sync_time`)은 실패가 없을 때만 갱신
 
 | 표 | 데이터 ID | 적재 방식 |
 |---|---|---|
-| `emp_dis_jobseeker_status` 구직자 현황 | 15014774 | 전체 교체 (희망임금 `(시급)10030` → 임금형태·금액 두 칸, `()0` 미기재는 NULL) |
-| `emp_dis_job_posting` 구인 정보 | 3072637 | 전체 교체 |
-| `emp_dis_center_usage` 발달장애인훈련센터 이용 | 15118552 | 전체 교체 (훈련과정명은 표에 칸이 없어 센터당 1행일 때만 적재) |
-| `emp_dis_obligation_status` 고용의무 현황 | 15014785 | 전체 교체 |
-| `emp_dis_consulting_his` 고용컨설팅 | 15014777 | 전체 교체 |
+| `emp_dis_jobseeker_status` 구직자 현황 | 15014774 | 판 단위 교체 (희망임금 `(시급)10030` → 임금형태·금액 두 칸, `()0` 미기재는 NULL) |
+| `emp_dis_job_posting` 구인 정보 | 3072637 | 판 단위 교체 |
+| `emp_dis_center_usage` 발달장애인훈련센터 이용 | 15118552 | 판 단위 교체 (훈련과정명은 표에 칸이 없어 센터당 1행일 때만 적재) |
+| `emp_dis_obligation_status` 고용의무 현황 | 15014785 | 판 단위 교체 |
+| `emp_dis_consulting_his` 고용컨설팅 | 15014777 | 판 단위 교체 |
 | `emp_dis_burden_workplace` 연계고용사업장 | 15067959 | 연도별 교체 (원천 `연도`) |
 | `emp_dis_regional_status` 지역별 고용 현황 | 15080750 | 연도별 교체 (원천에 연도 칸이 없어 **판 기준일의 연도**) |
-| `emp_dis_staff_train_crs` 전문인력 양성교육 | 15004132 | 전체 교체 |
-| `emp_dis_dev_support_org` 발달장애인 지원기관 | 15072489 | 전체 교체 (`최중증 통합돌봄` → `severe_integrated_care`, 01 v1.11.0) |
+| `emp_dis_staff_train_crs` 전문인력 양성교육 | 15004132 | 판 단위 교체 |
+| `emp_dis_dev_support_org` 발달장애인 지원기관 | 15072489 | 판 단위 교체 (`최중증 통합돌봄` → `severe_integrated_care`, 01 v1.11.0) |
 | `emp_dis_startup_lecture` 창업넷 일반강좌 | 15035266 | 연도별 교체 (원천 `교육년도`, 누적) |
-| `emp_dis_std_workplace` 표준사업장 | 3033670 | 전체 교체 |
-| `emp_dis_emp_incentive` 신규고용장려금 | 15121124 | 전체 교체 |
+| `emp_dis_std_workplace` 표준사업장 | 3033670 | 판 단위 교체 |
+| `emp_dis_emp_incentive` 신규고용장려금 | 15121124 | 판 단위 교체 |
 | `emp_dis_obligation_by_indust` 산업별 의무고용 | 15131080 | 연도별 교체 (원천 `해당연도`) |
 | `emp_dis_obligation_fulfillment` 의무고용 이행 사업체 | 15028087 | 연도별 교체 (원천 `연도`, 누적) |
 
 `emp_dis_obligation_by_type`(15074236)은 2023-12-31 판 1회로 끝난 데이터라 수집하지 않는다.
+판 단위 교체 표는 같은 판 기준일(`src_base_dt`)의 행만 지우고 다시 넣는다(지난 판은 그대로 남는다 — 최신 판만 보려면 `src_base_dt` 가 가장 늦은 행으로 거른다).
 연도별 교체 표는 새 판에 들어 있는 연도의 행만 지우고 다시 넣는다(판에 없는 옛 연도는 그대로 남는다).
 
 수동 실행 옵션 — `.env` 에 넣지 말고 명령줄에만 붙인다.
@@ -305,11 +310,11 @@ python main.py --mode db   --ext-sys ODCLOUD_EMP   # 판이 바뀐 표만 적재
 | `ODCLOUD_EMP_ONLY=<표>[,<표>]` | 이 표들만 실행. 일부 실행이라 알림·전체 동기화 시각 갱신 없음 |
 | `ODCLOUD_EMP_FORCE=<표>[,..]` 또는 `ALL` | 판이 그대로여도 다시 적재 |
 | `ODCLOUD_EMP_ACCEPT_DROP=<표>[,..]` 또는 `ALL` | 행 수 급감(50% 미만) 방어를 이번만 허용 |
-| `ODCLOUD_EMP_EDITION=<표>:<uddi>[,..]` | 최신 판 대신 지정한 판 적재 — **연도별 표만**(빠진 연도 보충용). 기록된 기준일보다 이른 판이면 추적 행은 그대로 둔다 |
+| `ODCLOUD_EMP_EDITION=<표>:<uddi>[,..]` | 최신 판 대신 지정한 판 적재(지난 판·빠진 연도 보충). 기록된 기준일보다 이른 판이면 추적 행은 그대로 둔다. 연도 없는 표는 그 판의 행만 넣고, 연도 표는 표에 없는 연도만 넣는다 |
 | `ODCLOUD_EMP_PAGE_SIZE` (기본 1000) · `ODCLOUD_EMP_MAX_PAGES` (기본 200) | 쪽 크기·쪽 수 상한 |
 
 ```bash
-# 예) 지역별 고용 현황 2024년분(_20241231 판) 보충
+# 예) 지역별 고용 현황 2024년분(_20241231 판) 보충 — 연도 없는 표의 지난 판도 같은 방법으로 넣는다
 ODCLOUD_EMP_ONLY=emp_dis_regional_status ODCLOUD_EMP_EDITION=emp_dis_regional_status:uddi:<판 uddi> \
   python main.py --mode db --ext-sys ODCLOUD_EMP
 

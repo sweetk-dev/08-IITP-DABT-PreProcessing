@@ -1,4 +1,4 @@
-"""장애인 고용 파일데이터 14종 수집·적재 흐름 — ODCLOUD_EMP (v1.19.0).
+"""장애인 고용 파일데이터 14종 수집·적재 흐름 — ODCLOUD_EMP (v1.19.0 · 판 보존 v1.20.0).
 
 main.py 가 ext_sys == 'ODCLOUD_EMP' 이면 이 모듈의 run_odcloud_emp() 로 위임한다.
 반환하는 요약은 이동편의 파이프라인(mobility_pipeline.run_mobility)과 같은 모양이라 main.py 의
@@ -10,7 +10,8 @@ main.py 가 ext_sys == 'ODCLOUD_EMP' 이면 이 모듈의 run_odcloud_emp() 로 
     3. 판 전체 수집(받은 행 수 = totalCount 확인) → 칸 검사·값 변환
     4. 원본 보존: ext_data/ODCLOUD_EMP/<YYYYMMDD>/<표>_<기준일>.json
     5. db 모드: 한 트랜잭션으로 적재 + 추적 행 갱신 / file 모드: 무엇이 바뀔지만 계산(DB 쓰기 없음)
-       급감 방어는 표 전체(전체 교체 표) 또는 연도마다(연도별 표) 본다.
+       연도 없는 표는 같은 판(src_base_dt)의 행만, 연도 표는 판에 실린 연도의 행만 바꾼다 — 지난 판은 남는다.
+       급감 방어는 직전 판(연도 없는 표) 또는 연도마다(연도별 표) 견준다.
 
 실행 결과
     targets = 대상 데이터셋 수, db_ok(file 모드는 files_ok) = 적재했거나 이미 최신인 데이터셋 수.
@@ -25,9 +26,10 @@ main.py 가 ext_sys == 'ODCLOUD_EMP' 이면 이 모듈의 run_odcloud_emp() 로 
                                            시각도 갱신하지 않는다(run_scope=PARTIAL).
     ODCLOUD_EMP_FORCE=<표>[,<표>]|ALL     판이 그대로여도 다시 적재.
     ODCLOUD_EMP_ACCEPT_DROP=<표>[,..]|ALL 행 수 급감(50% 미만) 방어를 이번만 허용.
-    ODCLOUD_EMP_EDITION=<표>:<uddi>[,..]  최신 판 대신 지정한 판을 적재(연도별 표만 — 빠진 연도 보충용).
-                                           기록된 기준일보다 이른 판이면 표에 없는 연도만 넣고(이미 있는
-                                           연도는 옛 값으로 덮지 않음) 추적 행은 바꾸지 않는다.
+    ODCLOUD_EMP_EDITION=<표>:<uddi>[,..]  최신 판 대신 지정한 판을 적재(지난 판·빠진 연도 보충용).
+                                           기록된 기준일보다 이른 판이면 추적 행은 바꾸지 않는다.
+                                           연도 없는 표는 그 판의 행만 넣고(다른 판은 그대로),
+                                           연도 표는 표에 없는 연도만 넣는다(이미 있는 연도는 옛 값으로 덮지 않음).
 """
 from __future__ import annotations
 
@@ -39,7 +41,7 @@ from typing import Dict
 import db_mobility
 import db_odcloud_emp
 from collectors.odcloud_emp import (
-    DATASET_BY_TABLE, DATASETS, EXT_SYS, MODE_YEAR, DatasetError, OdcloudEmpCollector,
+    DATASET_BY_TABLE, DATASETS, EXT_SYS, DatasetError, OdcloudEmpCollector,
     build_rows, editions_from_spec, pick_edition,
 )
 from db import get_api_info
@@ -81,10 +83,8 @@ def read_options() -> dict:
         ds = DATASET_BY_TABLE.get(tbl)
         if ds is None:
             raise ValueError('ODCLOUD_EMP_EDITION 에 모르는 표 이름: %s' % tbl)
-        if ds.mode != MODE_YEAR:
-            # 전체 교체 표에 옛 판을 넣으면 표가 통째로 과거로 돌아가고, 추적 행은 최신 판을 가리키는
-            # 상태로 남아 다음 실행도 바로잡지 않는다. 연도별 표(빠진 연도 보충)만 허용한다.
-            raise ValueError('ODCLOUD_EMP_EDITION 은 연도별 표에만 쓸 수 있음: %s' % tbl)
+        # v1.20.0: 연도 없는 표도 판 단위로 바꾸므로(다른 판은 그대로) 옛 판 보충을 허용한다.
+        # 기록된 기준일보다 이른 판이면 적재기가 추적 행을 바꾸지 않는다(db_odcloud_emp.load_dataset).
     return opts
 
 
@@ -132,7 +132,8 @@ def run_odcloud_emp(mode: str) -> dict:
                                                   track, opts['accept_drop'], pinned=bool(pinned))
                 info.update(result='loaded', **res)
             else:
-                plan = db_odcloud_emp.plan_dataset(ds.table, ds.mode, rows, opts['accept_drop'])
+                plan = db_odcloud_emp.plan_dataset(ds.table, ds.mode, rows, opts['accept_drop'],
+                                                   base_date=edition.base_date)
                 info.update(result='planned', **plan)
                 if plan['problem']:
                     raise DatasetError(plan['problem'])
