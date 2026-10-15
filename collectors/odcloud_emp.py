@@ -1,4 +1,4 @@
-"""공공데이터포털 장애인 고용 파일데이터 14종 정기 수집 어댑터 — ODCLOUD_EMP (v1.19.0 · 판 보존 v1.20.0).
+"""공공데이터포털 장애인 고용 파일데이터 14종 정기 수집 어댑터 — ODCLOUD_EMP (v1.19.0 · 판 보존 v1.20.0 · 지난 판 별칭 v1.20.1).
 
 배경
     emp_dis_* 표 15종은 2025-07 에 공공데이터포털(data.go.kr) 파일데이터를 한 번 받아 넣은 뒤
@@ -16,7 +16,8 @@
 
 판 고르기 — 가장 큰 기준일
     uddi 는 날짜 순서가 아니다. summary 끝의 _YYYYMMDD 를 날짜로 읽어 가장 늦은 판을 쓴다.
-    옛 판에는 '_08/13/2020', '(2018년)' 처럼 읽을 수 없는 summary 가 섞여 있어 그런 판은 건너뛴다.
+    옛 판에는 '_08/13/2020'(월/일/연), '(2018년)'(연도만 — 그해 12-31 로 본다) 표기가 섞여 있어
+    v1.20.1 부터 이 둘도 기준일로 읽는다(지난 판 보충 때 지정할 수 있게). 그래도 읽을 수 없는 판은 건너뛴다.
     읽히는 판이 하나도 없거나, 가장 늦은 기준일의 판이 둘 이상이면(어느 쪽이 맞는지 모름) 실패.
 
 칸 검사(column gate) — 조용히 버리지 않는다
@@ -308,34 +309,37 @@ DATASETS: Tuple[Dataset, ...] = (
     Dataset(
         table='emp_dis_job_posting', data_id=3072637, label='구인 정보', mode=MODE_EDITION,
         cols=(
-            _c('seq_no', '연번', conv=conv_int),
-            _c('apply_date', '구인신청일자', conv=conv_date),
+            # v1.20.1 별칭: 2025-06-30 판은 칸 이름 끝에 '명'·'자' 가 붙고(직종명·등록일자 등) 연번이
+            # 일련번호, 임금이 통상임금이다. 2021~2022 판은 구인신청일자가 구인등록일이다(값이 등록일과 같음).
+            _c('seq_no', '연번', '일련번호', conv=conv_int),
+            _c('apply_date', '구인신청일자', '구인등록일', conv=conv_date),
             _c('recruit_period', '모집기간'),
             _c('company_name', '사업장명'),
             # 2026-06-30 판에 모집직종 빈 행이 있다(7,085행 중 2행) — 01 v1.11.0 에서 NOT NULL 해제.
-            _c('job_type', '모집직종', null_ok=True),
-            _c('emp_type', '고용형태'),
+            _c('job_type', '모집직종', '직종명', null_ok=True),
+            _c('emp_type', '고용형태', '고용형태명'),
             _c('salary_type', '임금형태'),
-            _c('salary_amount', '임금', conv=conv_int, null_ok=True),
+            _c('salary_amount', '임금', '통상임금', conv=conv_int, null_ok=True),
             _c('hire_type', '입사형태'),
             _c('experience', '요구경력'),
             _c('education', '요구학력'),
             _c('major', '전공계열', null_ok=True),
             _c('license', '요구자격증', null_ok=True),
             _c('address', '사업장 주소', '사업장주소'),
-            _c('company_type', '기업형태'),
-            _c('office', '담당기관'),
-            _c('reg_date', '등록일', conv=conv_date),
+            _c('company_type', '기업형태', '기업형태명'),
+            _c('office', '담당기관', '담당기관명'),
+            _c('reg_date', '등록일', '등록일자', conv=conv_date),
             _c('tel', '연락처'),
         ),
     ),
     Dataset(
         table='emp_dis_center_usage', data_id=15118552, label='발달장애인훈련센터 이용', mode=MODE_EDITION,
         cols=(
-            _c('train_org', '기관구분명'),
+            # v1.20.1 별칭: 2022-12-31 판은 훈련기관구분 · 양성과정 이용자수 · 양성과정 취업자수(과정 칸 없이 양성과정만).
+            _c('train_org', '기관구분명', '훈련기관구분'),
             # 2025-07 첫 적재 때부터 '수료인원수' 를 user_count 에 넣어 왔다(칸 이름은 이용자 수).
-            _c('user_count', '수료인원수', '이용자수', conv=conv_int),
-            _c('employed_count', '취업자수', conv=conv_int),
+            _c('user_count', '수료인원수', '이용자수', '양성과정 이용자수', conv=conv_int),
+            _c('employed_count', '취업자수', '양성과정 취업자수', conv=conv_int),
         ),
         # 표에 과정 칸이 없다. 센터당 1행일 때만 뜻이 보존되므로 unique 로 센터 중복을 막는다.
         ignore={'훈련과정명': '표에 과정 칸 없음(센터당 1행 확인 후 적재)'},
@@ -348,7 +352,7 @@ DATASETS: Tuple[Dataset, ...] = (
             _c('workplace_count', '대상 사업체(개소)', conv=conv_int),
             _c('worker_count', '상시근로자수', '상시 근로자(명)', conv=conv_int),
             _c('disabled_count', '장애인수', '장애인(명)', conv=conv_int),
-            _c('emp_rate', '고용률', conv=conv_decimal),
+            _c('emp_rate', '고용률', '고용률(%)', conv=conv_decimal),     # '고용률(%)' — 2018·2020 판
         ),
     ),
     Dataset(
@@ -370,8 +374,9 @@ DATASETS: Tuple[Dataset, ...] = (
         mode=MODE_YEAR, year_from=YEAR_FROM_COLUMN,
         cols=(
             _c('year', '연도', conv=conv_int),
-            _c('company_name', '연계고용대상사업장명', '사업장명'),
-            _c('facility_type', '사업장유형구분', '시설구분'),
+            # v1.20.1 별칭: 2022·2023 판은 연계고용사업장명 · 사업장유형
+            _c('company_name', '연계고용대상사업장명', '사업장명', '연계고용사업장명'),
+            _c('facility_type', '사업장유형구분', '시설구분', '사업장유형'),
             _c('address', '지역', '사업장소재지'),
             _c('work_item', '도급품목'),
             _c('worker_count', '상시근로자수', conv=conv_int),
@@ -398,17 +403,19 @@ DATASETS: Tuple[Dataset, ...] = (
         # 데이터셋 이름이 '고용개발원 교육정보' → '장애인고용 전문인력 양성교육정보' 로 바뀌었다(ID 는 같음).
         table='emp_dis_staff_train_crs', data_id=15004132, label='전문인력 양성교육', mode=MODE_EDITION,
         cols=(
-            _c('course_type', '구분'),
-            _c('course_name', '교육연수과정명'),
+            # v1.20.1 별칭: 2019~2024 판의 과정구분·과정명·교육시작일·교육종료일·수강신청 시작일/종료일·교육장소.
+            # (2019~2023 판은 수강신청 칸 3개가 아예 없어 여전히 칸 검사에서 멈춘다 — 의도된 동작)
+            _c('course_type', '구분', '과정구분'),
+            _c('course_name', '교육연수과정명', '과정명'),
             _c('course_content', '교육내용'),
             _c('method', '교육방법'),
-            _c('start_date', '교육시작일자', conv=conv_date),
-            _c('end_date', '교육종료일자', conv=conv_date),
+            _c('start_date', '교육시작일자', '교육시작일', conv=conv_date),
+            _c('end_date', '교육종료일자', '교육종료일', conv=conv_date),
             _c('recruit_count', '모집인원', conv=conv_int),
-            _c('apply_start_date', '수강신청 시작일자', conv=conv_date, null_ok=True),
-            _c('apply_end_date', '수강신청 종료일자', conv=conv_date, null_ok=True),
+            _c('apply_start_date', '수강신청 시작일자', '수강신청 시작일', conv=conv_date, null_ok=True),
+            _c('apply_end_date', '수강신청 종료일자', '수강신청 종료일', conv=conv_date, null_ok=True),
             _c('apply_method', '수강신청방법', null_ok=True),
-            _c('location', '교육장소명', null_ok=True),
+            _c('location', '교육장소명', '교육장소', null_ok=True),
             _c('target', '교육대상', null_ok=True),
         ),
     ),
@@ -466,7 +473,8 @@ DATASETS: Tuple[Dataset, ...] = (
             # 2025-12-31 판에 전화번호 빈 행이 있다(877행 중 98행) — 01 v1.11.0 에서 NOT NULL 해제.
             _c('tel', '전화번호', null_ok=True),
             _c('business_item', '업종 및 주요생산품'),
-            _c('type', '구분'),
+            # v1.20.1 별칭: 2014~2023 판은 구분(일반·자회사·컨소시엄) 값을 '비고' 칸에 담았다(2014 판은 '비고(일반_자회사)').
+            _c('type', '구분', '비고', '비고(일반_자회사)'),
         ),
     ),
     Dataset(
@@ -529,17 +537,34 @@ class Edition:
 
 
 _EDITION_DATE_RE = re.compile(r'_(\d{8})\s*$')
+# 옛 판의 다른 표기 두 가지(v1.20.1 — 지난 판 보충 때 이 판들도 지정할 수 있게)
+#   '..._08/13/2020'  미국식 월/일/연 → 2020-08-13 (고용의무 현황 통계)
+#   '...(2018년)', '...(2014년도)'  연도만 있음 → 그해 12-31 로 본다(그 연도분 자료로 해석).
+#       실제 작성일은 알 수 없으므로 연말로 고정한다. 같은 데이터셋의 _YYYYMMDD 판과 날짜가 겹치면
+#       판 단위 교체가 서로를 지우므로, 보충 계획에서 겹침 여부를 확인한 뒤 지정한다.
+_EDITION_DATE_US_RE = re.compile(r'_(\d{1,2})/(\d{1,2})/(\d{4})\s*$')
+_EDITION_YEAR_RE = re.compile(r'\((\d{4})년도?\)\s*$')
 
 
 def parse_edition_date(summary: str) -> Optional[datetime.date]:
-    """'..._20251231' → date(2025, 12, 31). 형식이 다르거나 달력에 없는 날짜면 None."""
-    m = _EDITION_DATE_RE.search(str(summary or ''))
-    if not m:
-        return None
+    """판 이름(summary) → 기준일. 읽을 수 없거나 달력에 없는 날짜면 None.
+
+    '..._20251231' → 2025-12-31 / '..._08/13/2020' → 2020-08-13 / '...(2018년)' → 2018-12-31
+    """
+    text_ = str(summary or '')
     try:
-        return datetime.datetime.strptime(m.group(1), '%Y%m%d').date()
+        m = _EDITION_DATE_RE.search(text_)
+        if m:
+            return datetime.datetime.strptime(m.group(1), '%Y%m%d').date()
+        m = _EDITION_DATE_US_RE.search(text_)
+        if m:
+            return datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+        m = _EDITION_YEAR_RE.search(text_)
+        if m:
+            return datetime.date(int(m.group(1)), 12, 31)
     except ValueError:
         return None
+    return None
 
 
 def editions_from_spec(spec: dict) -> List[Edition]:
@@ -560,7 +585,8 @@ def editions_from_spec(spec: dict) -> List[Edition]:
 def pick_edition(editions: Sequence[Edition], pinned_uddi: Optional[str] = None) -> Edition:
     """가장 늦은 기준일의 판. pinned_uddi 가 있으면 그 판(수동 보충 적재용).
 
-    · 기준일을 읽을 수 없는 판은 건너뛴다(옛 판의 '08/13/2020', '(2018년)' 같은 표기).
+    · 기준일을 읽을 수 없는 판은 건너뛴다. (v1.20.1 부터 옛 판의 '_08/13/2020', '(2018년)' 표기도
+      기준일로 읽으므로 실제로 건너뛰는 판은 날짜 표기가 전혀 없는 판뿐이다.)
     · 읽히는 판이 없으면 DatasetError.
     · 가장 늦은 기준일의 판이 둘 이상이면 DatasetError — 어느 쪽이 맞는 판인지 알 수 없다.
       (운영자가 확인 뒤 ODCLOUD_EMP_EDITION 으로 지정해 적재할 수 있다.)
