@@ -136,7 +136,7 @@ class LoadDatasetDbTests(unittest.TestCase):
                             regional(2025, '서울 종로구', 9, dt=D0)])
         res = self._load(YEAR_T, 'year', [regional(2025, '서울 종로구', 5), regional(2025, '서울 중구', 6)])
         self.assertEqual((res['deleted'], res['inserted'], res['years']), (1, 2, [2025]))
-        rows = self._q('SELECT year, region, company_count, created_by, src_base_dt FROM %s ORDER BY year, region'
+        rows = self._q('SELECT year, region, company_count, created_by, src_base_dt FROM %s ORDER BY year, region COLLATE "C"'
                        % YEAR_T)
         self.assertEqual([tuple(r[:3]) for r in rows],
                          [(2020, '서울 종로구', 1), (2020, '서울 중구', 1), (2025, '서울 종로구', 5), (2025, '서울 중구', 6)])

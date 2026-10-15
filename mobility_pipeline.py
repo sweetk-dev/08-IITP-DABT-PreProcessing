@@ -8,6 +8,8 @@ GBIS 는 노선 메타에 이어 경유정류소(정류장 마스터 + 노선-�
 같은 실행에서 수집한다 (Issue #85). GBIS_COLLECT_STATIONS=false 로 끌 수 있다.
 GBIS_LOWFLOOR 는 저상버스 노선현황 페이지(전일 기준)를 읽어 tran_bus_route_info.low_bus_yn 만
 갱신한다 (Issue #97) — 매일 1회 실행 대상.
+실패 없이 끝나면 동기화 시각과 함께 공개 데이터 요약표(sys_data_summary_info)의 원천 기준일을
+갱신한다(v1.21.0, db_mobility.SUMMARY_REFRESH).
 """
 from __future__ import annotations
 
@@ -20,7 +22,9 @@ from db import get_api_info
 from collectors.gbis import GbisCollector
 from collectors.gbis_lowfloor import GbisLowFloorCollector
 from collectors.gg_culture import GgCultureCollector
+from collectors.gg_dis_reg import GgDisRegCollector
 from collectors.gg_toilet import GgToiletCollector
+from collectors.gg_welfare import GgWelfareCollector
 from collectors.korail_conv import KorailConvCollector
 from collectors.kowsi_facl import KowsiFaclCollector
 from collectors.tour_bf import TourBfCollector
@@ -33,7 +37,9 @@ MOBILITY_COLLECTORS = {
     'GBIS': GbisCollector,
     'GBIS_LOWFLOOR': GbisLowFloorCollector,
     'GG_CULTURE': GgCultureCollector,
+    'GG_DIS_REG': GgDisRegCollector,
     'GG_TOILET': GgToiletCollector,
+    'GG_WELFARE': GgWelfareCollector,
     'KORAIL_CONV': KorailConvCollector,
     'KOWSI_FACL': KowsiFaclCollector,
     'TOUR_BF_API': TourBfCollector,
@@ -45,7 +51,9 @@ _UPSERT_DISPATCH = {
     'GBIS': db_mobility.upsert_bus_routes,
     'GBIS_LOWFLOOR': db_mobility.update_bus_route_low_floor,
     'GG_CULTURE': db_mobility.upsert_culture_facilities,
+    'GG_DIS_REG': db_mobility.sync_gg_dis_reg,
     'GG_TOILET': db_mobility.upsert_public_toilets,
+    'GG_WELFARE': db_mobility.sync_welfare_facilities,
     'KORAIL_CONV': db_mobility.upsert_station_access,
     'KOWSI_FACL': db_mobility.upsert_facilities,
     'TOUR_BF_API': db_mobility.upsert_tour_bf,
@@ -143,4 +151,6 @@ def run_mobility(ext_sys: str, mode: str) -> dict:
             logger.warning('%s: 실패 %d건 — 동기화 시각 갱신 보류', ext_sys, len(summary['failures']))
         else:
             db_mobility.touch_latest_sync(ext_sys)
+            # v1.21.0: 공개 데이터 요약표(06 플랫폼 목록)의 원천 기준일도 함께 맞춘다. 실패해도 예외 없음.
+            db_mobility.refresh_data_summary(ext_sys)
     return summary

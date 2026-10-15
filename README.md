@@ -1,6 +1,6 @@
 # 장애인 이동편의 공공데이터 멀티소스 수집·전처리 툴
 
-![version](https://img.shields.io/badge/version-v1.17.0-blue)
+![version](https://img.shields.io/badge/version-v1.21.0-blue)
 
 ## 개요
 장애인 이동편의·편의시설 관련 공공데이터를 소스별 수집 어댑터로 수집해, 파일 저장·정제·DB 적재까지 처리하는 Python 기반 툴입니다.
@@ -194,6 +194,71 @@ python main.py --mode db   --ext-sys GG_TOILET   # (이름+주소) 매칭 동기
 - 이 테이블엔 원천 고유키가 없어 **(이름+주소) 로 기존 행을 찾아 제자리 갱신(id 보존)·미매칭 신규 INSERT·원천에서 사라진 행 논리삭제**를 한 트랜잭션에서 처리한다. 대상 지역은 `GG_TOILET_ADDR_FILTER`(기본 `경기도 안양시`) 로 정한다. 수집 0건이면 무동작, 기존 활성 행의 70% 미만이면 중단
 - 원천에 없는 개방시간 상세(`open_time_detail`)는 매칭된 기존 행의 값을 유지한다
 - 필드 대응 근거·한계는 `docs/poi_public_toilet_info_안양_갱신_GG_TOILET_2026-09-05.md`
+
+## 경기 장애인복지시설 적재 (경기데이터드림 `GG_WELFARE`, v1.21.0)
+
+경기데이터드림(제공: 경기도장애인복지종합지원센터) 장애인복지시설 5종을 `poi_welfare_facility` 한 표에 담는다(종류 칸 `facility_type`).
+먼저 01 v1.14.0(`local_stats_welfare_v1140.sql`)을 적용한다. 인증키는 `GG_CULTURE` 와 같은 경기데이터드림 키(01 마이그레이션이 복사).
+
+| 종류 | 서비스 | 건수(2026-10) | 담는 값 |
+|---|---|---|---|
+| `residence` 장애유형별 거주시설 | `Ggobstcltyperesidnc` | 88 | 장애유형(`sub_type`)·입소 정원/현원·종사자 정원/현원·설치신고일·법인 |
+| `short_residence` 단기거주시설 | `Ggdspsnshtpedresidnc` | 29 | 입소·종사자 정원/현원·설치신고일·법인 |
+| `protect_workshop` 보호작업장 | `Ggdspsnprotectwrkshp` | 158 | 근로장애인 정원/현원(`capacity_cnt`/`current_cnt`)·종사자·설치신고일·법인 |
+| `il_center` 중증장애인자립생활지원센터 | `Ggsersillnsdspsncenter` | 61 | 위치·연락처 |
+| `support_center` 장애인 관련 시설 | `Ggdspsnrelatefaclt` | 28 | 기관 구분(`sub_type` — 가족지원·인권·발달장애인지원·권익옹호)·위치·연락처 |
+
+```bash
+python main.py --mode file --ext-sys GG_WELFARE   # ext_data/GG_WELFARE/<날짜>/rows.json 만 저장
+python main.py --mode db   --ext-sys GG_WELFARE
+# crontab 예시 — 매월 2일 04:25 (원천 갱신은 연 1회)
+25 4 2 * * cd <PROJECT_DIR> && .venv/bin/python main.py --mode db --ext-sys GG_WELFARE >> logs/cron.log 2>&1
+```
+
+- 동기화 규칙은 `GG_CULTURE`(문화·체육 시설)와 같다: (이름+주소) 매칭 갱신 → 논리삭제 행 되살림 → 이름만 같은 1:1 짝은 주소 변경 → 신규 / 사라진 행 논리삭제. 종류별 트랜잭션, 한 종류 실패는 그 종류만 건너뛰고 부분 완료(종료코드 2)
+- 급감 방어: 지워질 시설이 max(3곳, 기존 30%)를 넘으면 그 종류 중단 → 확인 뒤 `GG_WELFARE_ACCEPT_DROP=<종류>` 로 수동 실행
+- 같은 종류 안에서 (이름, 주소)가 같은 행은 첫 행만 쓴다(2026-10 원천에 거주시설 1곳이 현원만 다르게 두 번 실림)
+- 홈페이지 자리표시자 `www.` 는 빈 값, 정원·현원은 정수(음수·숫자 아님은 빈 값)
+- 쪽 크기·쪽 수 상한: `GG_WELFARE_PAGE_SIZE`(기본 1000)·`GG_WELFARE_MAX_PAGES`(기본 20)
+
+## 경기 읍면동 등록장애인 적재 (경기데이터드림 `GG_DIS_REG`, v1.21.0)
+
+「경기도 내 등록장애인 집계현황(읍면동별·유형별·정도별)」(`GGREDISPERST`)을 `stats_gg_dis_reg_emd` 에 적재한다.
+**시군마다 원천 기준일(`DATA_COLCT_DE`)이 다르다**(2026-10 기준 2021-06 ~ 2026-05). 그래서 시군별 기준일을 판으로 보고 쌓는다.
+
+```bash
+python main.py --mode file --ext-sys GG_DIS_REG
+python main.py --mode db   --ext-sys GG_DIS_REG
+# crontab 예시 — 매월 2일 04:30 (시군이 수시로 새 기준일 자료를 올린다)
+30 4 2 * * cd <PROJECT_DIR> && .venv/bin/python main.py --mode db --ext-sys GG_DIS_REG >> logs/cron.log 2>&1
+```
+
+- 정제: 합계 행(유형 `소계`·`전체`·`합계`, 읍면동 `전체`)은 적재하지 않는다(합산이 두 배가 된다). 장애유형 `장루.요루`·`장루, 요루` → `장루·요루`. 구 칸에 시군명이 온 행은 구 없음. 인원은 정수, 빈 값은 그대로 빈 값
+- 같은 (시군, 구, 읍면동, 유형, 기준일)이 여러 행이면 값을 더해 한 행으로 만든다(2026-10 원천에 수원 정자1동·영통3동 등 38곳 — 서로 다른 동이 같은 이름으로 실린 것으로 보여, 버리면 시군·구 합계가 줄어든다). 경고 로그에 예시를 남긴다
+- 적재: (시군, 기준일) 판마다 트랜잭션. 같은 판의 행만 지우고 다시 넣고 **다른 기준일의 판은 남긴다**. 원천에서 빠진 시군의 지난 판도 그대로 둔다. 최신 판만 보려면 뷰 `v_stats_gg_dis_reg_emd_latest`
+- 급감 방어: 새 판 행 수가 비교 대상(같은 판을 다시 넣으면 그 판, 아니면 그 시군의 직전 판)의 50% 미만이면 그 시군 중단 → 확인 뒤 `GG_DIS_REG_ACCEPT_DROP=<시군명>`(또는 `ALL`)
+- 쪽 크기·쪽 수 상한: `GG_DIS_REG_PAGE_SIZE`(기본 1000)·`GG_DIS_REG_MAX_PAGES`(기본 40)
+- 시군 비교·경기 합계에는 시군별 기준일을 반드시 함께 보인다. 같은 기준일로 시군을 비교할 때는 KOSIS `DT_11761_N009`(시군구별 장애정도별 성별, `stats_dis_reg_sgg_by_sev_gen`)를 쓴다 — KOSIS 수집 배치가 함께 적재한다(01 v1.14.0 이 수집 정보 행을 등록)
+
+## 공개 데이터 요약표 기준일 갱신 (v1.21.0)
+
+06 플랫폼 데이터 목록·상세의 원천 갱신일은 `sys_data_summary_info.src_latest_chn_dt` 를 보여 준다. KOSIS·`ODCLOUD_EMP` 는 각 적재기가 갱신해 왔고,
+이동편의·시설 수집 작업은 갱신하는 경로가 없었다. 이제 행 단위 수집 작업(`--ext-sys` 이동편의·시설 작업)이 **실패 없이 끝나면** 동기화 시각과 함께
+요약표의 원천 기준일·확인일(`sys_data_ref_dt`)을 갱신한다(`db_mobility.SUMMARY_REFRESH`).
+
+| 작업 | 요약표 행(`sys_tbl_id`) | 원천 기준일 |
+|---|---|---|
+| `GBIS` · `GBIS_LOWFLOOR` | `tran_bus_route_info` | 활성 행 `base_dt`·`low_bus_base_dt` 중 늦은 값의 최댓값 |
+| `KORAIL_CONV` | `poi_station_access_status` | 활성 행 `base_dt` 최댓값 |
+| `KOWSI_FACL` | `poi_facility_accessibility` | 활성 행 `base_dt` 최댓값 |
+| `TOUR_BF_API` | `poi_tour_bf_facility` | 활성 행 `base_dt` 최댓값 |
+| `GG_TOILET` | `poi_public_toilet_info` | 활성 행 `base_dt` 최댓값 |
+| `GG_DIS_REG` | `stats_gg_dis_reg_emd` | `base_dt` 최댓값 |
+| `GG_CULTURE` · `GG_WELFARE` | `poi_culture_sports_facility` · `poi_welfare_facility` | 원천이 기준일을 주지 않아 대조 확인한 날(실행일) |
+
+- 원천 기준일은 적재된 행에서 다시 구해 덮어쓴다. 버스 표는 두 작업이 같은 식(`base_dt`·`low_bus_base_dt` 중 늦은 값의 최댓값)을 써서 어느 쪽이 늦게 돌아도 같은 값이 된다
+- 요약표에 행이 없으면(01 v1.14.0 미적용 등) 경고만 남기고, 갱신 실패가 수집 결과를 실패로 만들지 않는다
+- 일부 실패(부분 완료)한 실행은 갱신하지 않는다(동기화 시각과 같은 규칙)
 
 ## 보조기기 수리 서비스센터 적재 (경기데이터드림 `GG_ASSIST_REPAIR`, v1.15.0)
 

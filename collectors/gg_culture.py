@@ -120,7 +120,11 @@ def raw_key(row: dict) -> tuple:
 
 
 class GgCultureCollector(MobilityCollector):
+    """경기데이터드림 여러 서비스(종류) 수집기. 장애인복지시설(GG_WELFARE)도 이 클래스를 이어받아
+    서비스 목록(SERVICES)·행 변환(map_source_row)·환경변수 머리(ENV_PREFIX)만 바꿔 쓴다."""
     EXT_SYS = EXT_SYS
+    ENV_PREFIX = 'GG_CULTURE'
+    SERVICES = SERVICES
     DEFAULT_BASE_URL = 'https://openapi.gg.go.kr'
 
     def __init__(self, api_info: dict = None, stats_src: dict = None):
@@ -140,12 +144,12 @@ class GgCultureCollector(MobilityCollector):
 
     @property
     def page_size(self) -> int:
-        return min(int(os.getenv('GG_CULTURE_PAGE_SIZE', str(MAX_PAGE_SIZE))), MAX_PAGE_SIZE)
+        return min(int(os.getenv(self.ENV_PREFIX + '_PAGE_SIZE', str(MAX_PAGE_SIZE))), MAX_PAGE_SIZE)
 
     @property
     def max_pages(self) -> int:
         """무한 루프 방어 상한. 가장 큰 종류(책나래 260건)도 1페이지면 끝난다."""
-        return int(os.getenv('GG_CULTURE_MAX_PAGES', '20'))
+        return int(os.getenv(self.ENV_PREFIX + '_MAX_PAGES', '20'))
 
     def _page_url(self, service: str, page_no: int) -> str:
         return (self.base_url + '/' + service
@@ -154,9 +158,14 @@ class GgCultureCollector(MobilityCollector):
                 + '&pIndex=' + str(page_no)
                 + '&pSize=' + str(self.page_size))
 
+    @staticmethod
+    def map_source_row(facility_type: str, src: dict) -> dict:
+        """원천 1행 → 적재 행. 하위 클래스가 바꾼다."""
+        return map_row(facility_type, src)
+
     def collect_service(self, facility_type: str, service: str) -> List[dict]:
         """서비스 하나를 끝까지 페이징 수집. 총건수와 받은 행 수가 다르면 RuntimeError."""
-        label = '%s:%s' % (EXT_SYS, facility_type)
+        label = '%s:%s' % (self.EXT_SYS, facility_type)
         raw: List[dict] = []
         total = None
         page = 1
@@ -186,7 +195,7 @@ class GgCultureCollector(MobilityCollector):
         seen = set()
         dropped_name = dup = bad_coord = bad_date = 0
         for src in raw:
-            row = map_row(facility_type, src)
+            row = self.map_source_row(facility_type, src)
             if not row['name']:
                 dropped_name += 1
                 continue
@@ -209,24 +218,24 @@ class GgCultureCollector(MobilityCollector):
         return rows
 
     def collect(self) -> List[dict]:
-        """4종을 차례로 수집. 실패한 종류는 건너뛰고 self.failures 에 남긴다."""
+        """종류(서비스)를 차례로 수집. 실패한 종류는 건너뛰고 self.failures 에 남긴다."""
         self.failures = []
         self.collected = {}
         rows: List[dict] = []
-        for facility_type, service, title in SERVICES:
+        for facility_type, service, title in self.SERVICES:
             try:
                 part = self.collect_service(facility_type, service)
             except Exception as exc:   # 종류별 격리 — 다른 종류 수집은 계속한다
                 reason = '%s 수집 실패: %s' % (title, exc)
-                logger.error('%s:%s %s', EXT_SYS, facility_type, reason)
-                self.failures.append({'id': '%s:%s' % (EXT_SYS, facility_type),
+                logger.error('%s:%s %s', self.EXT_SYS, facility_type, reason)
+                self.failures.append({'id': '%s:%s' % (self.EXT_SYS, facility_type),
                                       'stage': 'collect', 'reason': reason[:300]})
                 continue
             self.collected[facility_type] = len(part)
             rows.extend(part)
             self.pause()
         if not self.collected:
-            raise RuntimeError('GG_CULTURE: 4종 모두 수집 실패 — ' +
+            raise RuntimeError('%s: %d종 모두 수집 실패 — ' % (self.EXT_SYS, len(self.SERVICES)) +
                                ' / '.join(f['reason'] for f in self.failures))
-        logger.info('GG_CULTURE: 종류별 수집 %s, 실패 %d종', self.collected, len(self.failures))
+        logger.info('%s: 종류별 수집 %s, 실패 %d종', self.EXT_SYS, self.collected, len(self.failures))
         return rows
