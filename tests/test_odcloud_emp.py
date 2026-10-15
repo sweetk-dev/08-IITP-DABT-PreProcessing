@@ -99,8 +99,29 @@ class ConverterTests(unittest.TestCase):
 class EditionTests(unittest.TestCase):
     def test_parse_date(self):
         self.assertEqual(parse_edition_date('a_b_20251231'), datetime.date(2025, 12, 31))
-        for bad in ('x_08/13/2020', 'x(2018년)', 'x_20251332', ''):
+        # v1.20.1 — 옛 판 표기: 미국식 월/일/연, 연도만 있는 판(그해 12-31 로 본다)
+        self.assertEqual(parse_edition_date('한국장애인고용공단_고용의무 현황 통계_08/13/2020'),
+                         datetime.date(2020, 8, 13))
+        self.assertEqual(parse_edition_date('x_1/5/2019'), datetime.date(2019, 1, 5))
+        self.assertEqual(parse_edition_date('장애인 고용의무 현황(2018년)'), datetime.date(2018, 12, 31))
+        self.assertEqual(parse_edition_date('표준사업장 현황(2014년도)'), datetime.date(2014, 12, 31))
+        for bad in ('x_20251332', 'x_13/40/2020', 'x(2018)', 'x_2025', '', None):
             self.assertIsNone(parse_edition_date(bad), bad)
+
+    def test_old_notation_editions_compete_by_date(self):
+        # 옛 표기 판도 기준일이 읽히므로 가장 늦은 판 고르기에 참여한다(더 이른 날짜면 뽑히지 않는다).
+        eds = [edition([], '2025-12-31', '/1/v1/uddi:a'),
+               Edition('/1/v1/uddi:b', 'x_08/13/2020', datetime.date(2020, 8, 13), ()),
+               Edition('/1/v1/uddi:c', 'x(2018년)', datetime.date(2018, 12, 31), ())]
+        self.assertEqual(pick_edition(eds).uddi, 'uddi:a')
+        self.assertEqual(pick_edition(eds, pinned_uddi='c').base_date, datetime.date(2018, 12, 31))
+
+    def test_spec_reads_old_notation_dates(self):
+        spec = {'paths': {'/15000000/v1/uddi:old': {'get': {'summary': '고용의무 현황_08/13/2020'}},
+                          '/15000000/v1/uddi:yr': {'get': {'summary': '고용의무 현황(2018년)'}}},
+                'definitions': {}}
+        got = {e.uddi: e.base_date for e in editions_from_spec(spec)}
+        self.assertEqual(got, {'uddi:old': datetime.date(2020, 8, 13), 'uddi:yr': datetime.date(2018, 12, 31)})
 
     def test_latest_by_date_not_by_uddi(self):
         eds = editions_from_spec(FIXTURE['emp_dis_obligation_status']['spec'])
@@ -194,6 +215,86 @@ class GateTests(unittest.TestCase):
             build_rows(DATASET_BY_TABLE['emp_dis_regional_status'], ed, raw)
 
 
+class OldEditionAliasTests(unittest.TestCase):
+    """v1.20.1 — 지난 판 보충용 별칭. 칸 목록은 실제 명세(지난 판)에서 그대로 옮겼다."""
+
+    def mapped(self, table, fields):
+        ds = DATASET_BY_TABLE[table]
+        got = resolve_columns(ds, fields)
+        return {ds.cols[i].target if isinstance(ds.cols[i].target, str) else '·'.join(ds.cols[i].target): src
+                for i, src in got.items()}
+
+    def test_job_posting_202506_names(self):
+        m = self.mapped('emp_dis_job_posting', [
+            '일련번호', '구인신청일자', '모집기간', '사업장명', '직종명', '고용형태명', '임금형태', '통상임금',
+            '입사형태', '요구경력', '요구학력', '전공계열', '요구자격증', '사업장 주소', '기업형태명', '담당기관명',
+            '등록일자', '연락처'])
+        self.assertEqual((m['seq_no'], m['job_type'], m['emp_type'], m['salary_amount'], m['company_type'],
+                          m['office'], m['reg_date']),
+                         ('일련번호', '직종명', '고용형태명', '통상임금', '기업형태명', '담당기관명', '등록일자'))
+
+    def test_job_posting_2021_apply_date(self):
+        m = self.mapped('emp_dis_job_posting', [
+            '연번', '구인등록일', '모집기간', '사업장명', '모집직종', '고용형태', '임금형태', '임금', '입사형태',
+            '요구경력', '요구학력', '전공계열', '요구자격증', '사업장주소', '기업형태', '담당기관', '등록일', '연락처'])
+        self.assertEqual((m['apply_date'], m['address']), ('구인등록일', '사업장주소'))
+
+    def test_center_usage_2022(self):
+        m = self.mapped('emp_dis_center_usage', ['훈련기관구분', '양성과정 이용자수', '양성과정 취업자수'])
+        self.assertEqual(m, {'train_org': '훈련기관구분', 'user_count': '양성과정 이용자수',
+                             'employed_count': '양성과정 취업자수'})
+
+    def test_obligation_status_rate_with_percent(self):
+        m = self.mapped('emp_dis_obligation_status', ['기관', '대상 사업체(개소)', '상시 근로자(명)', '장애인(명)', '고용률(%)'])
+        self.assertEqual(m['emp_rate'], '고용률(%)')
+
+    def test_burden_2022_2023(self):
+        m = self.mapped('emp_dis_burden_workplace', [
+            '연도', '연계고용사업장명', '사업장유형', '지역', '도급품목', '상시근로자수', '장애인근로자수', '중증장애인수'])
+        self.assertEqual((m['company_name'], m['facility_type']), ('연계고용사업장명', '사업장유형'))
+
+    def test_staff_train_202401(self):
+        m = self.mapped('emp_dis_staff_train_crs', [
+            '과정구분', '과정명', '교육내용', '교육방법', '교육시작일', '교육종료일', '모집인원', '수강신청 시작일',
+            '수강신청 종료일', '수강신청방법', '교육장소', '교육대상'])
+        self.assertEqual((m['course_type'], m['course_name'], m['start_date'], m['end_date'],
+                          m['apply_start_date'], m['apply_end_date'], m['location']),
+                         ('과정구분', '과정명', '교육시작일', '교육종료일', '수강신청 시작일', '수강신청 종료일', '교육장소'))
+
+    def test_staff_train_without_apply_columns_still_fails(self):
+        # 2019~2023 판은 수강신청 칸 3개가 없다 — 별칭으로 메울 수 없는 구조 차이라 그대로 멈춘다
+        with self.assertRaisesRegex(DatasetError, "필수 칸 없음: '수강신청 시작일자'"):
+            resolve_columns(DATASET_BY_TABLE['emp_dis_staff_train_crs'], [
+                '과정구분', '과정명', '교육내용', '교육방법', '교육시작일', '교육종료일', '모집인원', '교육장소', '교육대상'])
+
+    def test_std_workplace_note_column_is_type(self):
+        base = ['인증번호', '사업체명', '관할지사', '대표자', '사업자등록번호', '소재지', '인증일자', '전화번호',
+                '업종 및 주요생산품']
+        self.assertEqual(self.mapped('emp_dis_std_workplace', base + ['비고'])['type'], '비고')
+        self.assertEqual(self.mapped('emp_dis_std_workplace', base + ['비고(일반_자회사)'])['type'], '비고(일반_자회사)')
+        with self.assertRaisesRegex(DatasetError, '둘 이상'):       # 구분·비고가 함께 오면 어느 쪽인지 모른다
+            resolve_columns(DATASET_BY_TABLE['emp_dis_std_workplace'], base + ['구분', '비고'])
+
+    def test_std_workplace_without_office_still_fails(self):
+        # 2014~2019 판은 관할지사 칸이 없다 — 별칭 문제가 아니라 칸이 없는 것이므로 멈춘다
+        with self.assertRaisesRegex(DatasetError, "필수 칸 없음: '관할지사'"):
+            resolve_columns(DATASET_BY_TABLE['emp_dis_std_workplace'], [
+                '인증번호', '사업체명', '대표자', '사업자등록번호', '소재지', '인증일자', '전화번호',
+                '업종 및 주요생산품', '비고'])
+
+    def test_job_posting_202506_row_converts(self):
+        names = ['일련번호', '구인신청일자', '모집기간', '사업장명', '직종명', '고용형태명', '임금형태', '통상임금',
+                 '입사형태', '요구경력', '요구학력', '전공계열', '요구자격증', '사업장 주소', '기업형태명', '담당기관명',
+                 '등록일자', '연락처']
+        vals = [7, '2025-06-01', '2025-06-01~2025-06-30', '가나상사', '사무원', '상용직', '월급', '2,100,000',
+                '신입', '무관', '고졸', '', '', '서울특별시 중구', '중소기업', '서울지사', '2025-06-02', '02-000-0000']
+        ed = Edition('/1/v1/uddi:p', 'x_20250630', datetime.date(2025, 6, 30), tuple(names))
+        rows, _ = build_rows(DATASET_BY_TABLE['emp_dis_job_posting'], ed, [dict(zip(names, vals))])
+        r = rows[0]
+        self.assertEqual((r['seq_no'], r['salary_amount'], r['reg_date'], r['job_type'], r['src_base_dt']),
+                         (7, 2100000, datetime.date(2025, 6, 2), '사무원', datetime.date(2025, 6, 30)))
+
+
 class BuildRowsTests(unittest.TestCase):
     def test_jobseeker_salary_is_split(self):
         ed, raw = fixture_edition('emp_dis_jobseeker_status')
@@ -217,9 +318,10 @@ class BuildRowsTests(unittest.TestCase):
     def test_old_edition_names_map_to_same_columns(self):
         ed, raw = fixture_edition('emp_dis_obligation_status')     # 08/13/2020 판(옛 칸 이름)
         rows, _ = build_rows(DATASET_BY_TABLE['emp_dis_obligation_status'], ed, raw)
-        # 이 옛 판은 기준일을 읽을 수 없는 판('_08/13/2020')이라 src_base_dt 도 None 이다(실제로는 고를 수 없는 판)
+        # 이 옛 판의 이름은 '_08/13/2020'(미국식) — v1.20.1 부터 기준일 2020-08-13 으로 읽는다
         self.assertEqual(rows[0], {'org_name': '중앙행정기관', 'workplace_count': 52, 'worker_count': 187439,
-                                   'disabled_count': 6880, 'emp_rate': Decimal('3.67'), 'src_base_dt': None})
+                                   'disabled_count': 6880, 'emp_rate': Decimal('3.67'),
+                                   'src_base_dt': datetime.date(2020, 8, 13)})
 
     def test_regional_year_comes_from_edition(self):
         ed, raw = fixture_edition('emp_dis_regional_status')        # _20241231 판
