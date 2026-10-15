@@ -26,6 +26,8 @@ ITEST_MODULES = {
     'test_db_processing': ('KosisLoadDbTests',),
     'test_mobility_db': ('UpsertFacilitiesDbTests', 'UpsertEmergencySupportDbTests'),
     'test_gg_toilet_db': ('SyncPublicToiletsDbTests',),
+    'test_gg_culture_db': ('SyncCultureDbTests',),
+    'test_gg_welfare_db': ('WelfareDisRegDbTests',),
 }
 
 # 접속되지 않는 주소(포트 1). 테스트는 접속을 시도하지 않지만, 시도하더라도 닿는 DB 가 없게 한다.

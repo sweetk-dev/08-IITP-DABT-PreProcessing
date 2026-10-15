@@ -15,13 +15,16 @@
 - poi_public_toilet_info       (GG_TOILET)     자연키 없음 → (이름+주소) 매칭 UPDATE / 미매칭 INSERT / 사라진 행 논리삭제
 - poi_emergency_support        (GG_ASSIST_REPAIR) ON CONFLICT (support_type, name, coalesce(addr_road,''))
 - poi_culture_sports_facility  (GG_CULTURE)    자연키 없음 → 종류별 (이름+주소) 매칭 UPDATE / 되살림 / INSERT / 논리삭제, 종류별 트랜잭션
+- poi_welfare_facility         (GG_WELFARE)    GG_CULTURE 와 같은 방식(장애인복지시설 5종, v1.21.0)
+- stats_gg_dis_reg_emd         (GG_DIS_REG)    (시군, 기준일) 판 단위 교체 — 다른 기준일 판은 남김, 시군별 트랜잭션 (v1.21.0)
+- sys_data_summary_info        수집 작업이 실패 없이 끝나면 원천 기준일·확인일 갱신 (refresh_data_summary, v1.21.0)
 
 created_by 는 DB 공통코드(sys_work_type) 시드 정본 'SYS-BACH' 를 따른다.
 """
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Optional
 
 from sqlalchemy import text
 
@@ -724,7 +727,20 @@ def culture_match_keys(name, addr_road, addr_jibun) -> list:
 
 
 def _sync_culture_type(conn, facility_type: str, rows: List[dict]) -> dict:
-    """한 종류를 동기화한다(호출자가 트랜잭션을 연다). 반환 {'matched','revived','inserted','deleted'}.
+    """문화·체육 시설 한 종류 동기화 — 규칙은 _sync_facility_type 참고."""
+    return _sync_facility_type(conn, _culture_spec(), facility_type, rows)
+
+
+def _culture_spec() -> dict:
+    # 표 이름은 부를 때 읽는다 — 통합 테스트가 CULTURE_TABLE 을 임시 표로 바꿔 끼운다.
+    return {'table': CULTURE_TABLE, 'columns': CULTURE_COLUMNS, 'accept_env': 'GG_CULTURE_ACCEPT_DROP'}
+
+
+def _sync_facility_type(conn, spec: dict, facility_type: str, rows: List[dict]) -> dict:
+    """(이름+주소) 시설 목록 표 한 종류를 동기화한다(호출자가 트랜잭션을 연다).
+
+    spec: {'table': 표, 'columns': facility_type 밖의 적재 칸, 'accept_env': 급감 허용 환경변수}
+    반환 {'matched','revived','inserted','deleted'}.
 
     매칭 순서
       1) (이름, 주소) 가 같은 활성 행 → 제자리 UPDATE
@@ -738,7 +754,10 @@ def _sync_culture_type(conn, facility_type: str, rows: List[dict]) -> dict:
     import os
     from sqlalchemy import bindparam
 
-    table = CULTURE_TABLE
+    table = spec['table']
+    columns = spec['columns']
+    # 같은 표·종류를 두 실행(정기 + 수동)이 동시에 바꾸지 않게 트랜잭션 잠금을 건다.
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {'k': table + ':' + facility_type})
     existing = conn.execute(text(
         "SELECT facility_id, name, addr_road, addr_jibun, del_yn FROM " + table +
         " WHERE facility_type=:t ORDER BY facility_id"), {'t': facility_type}).fetchall()
@@ -791,18 +810,19 @@ def _sync_culture_type(conn, facility_type: str, rows: List[dict]) -> dict:
     stale_ids = [r[0] for r in active if r[0] not in used]
     # 급감 방어 — 매칭이 끝난 뒤 실제로 지워질 행 수로 판정한다(수집 건수만 보면 이름이 바뀐 행 등이 섞인다).
     drop_limit = max(CULTURE_DROP_MIN_ABS, int(len(active) * CULTURE_DROP_MAX_RATIO))
-    accepted = {t.strip() for t in os.getenv('GG_CULTURE_ACCEPT_DROP', '').split(',') if t.strip()}
+    accepted = {t.strip() for t in os.getenv(spec['accept_env'], '').split(',') if t.strip()}
     if len(stale_ids) > drop_limit and facility_type not in accepted:
         raise RuntimeError('%s(%s): 논리삭제 예정 %d건이 허용 %d건(기존 활성 %d건)을 넘음 — 원천 장애로 보고 적재 중단.'
-                           ' 실제 정리가 맞으면 GG_CULTURE_ACCEPT_DROP=%s 로 수동 실행'
-                           % (table, facility_type, len(stale_ids), drop_limit, len(active), facility_type))
+                           ' 실제 정리가 맞으면 %s=%s 로 수동 실행'
+                           % (table, facility_type, len(stale_ids), drop_limit, len(active),
+                              spec['accept_env'], facility_type))
     # install_report_dt 는 문자열('YYYY-MM-DD')로 오므로 CAST 를 붙여 따로 지정한다(같은 칸을 두 번 쓰지 않게 제외).
-    set_clause = ', '.join('%s=:%s' % (c, c) for c in CULTURE_COLUMNS if c != 'install_report_dt')
+    set_clause = ', '.join('%s=:%s' % (c, c) for c in columns if c != 'install_report_dt')
     update_sql = text(
         "UPDATE " + table + " SET " + set_clause + ", install_report_dt=CAST(:install_report_dt AS date),"
         " del_yn='N', deleted_at=NULL, deleted_by=NULL,"
         " updated_at=CURRENT_TIMESTAMP, updated_by=:created_by WHERE facility_id=:facility_id")
-    insert_cols = ('facility_type',) + CULTURE_COLUMNS
+    insert_cols = ('facility_type',) + tuple(columns)
     insert_sql = text(
         "INSERT INTO " + table + " (" + ', '.join(insert_cols) + ", created_by) VALUES (" +
         ', '.join('CAST(:install_report_dt AS date)' if c == 'install_report_dt' else ':' + c
@@ -812,8 +832,13 @@ def _sync_culture_type(conn, facility_type: str, rows: List[dict]) -> dict:
         " updated_at=CURRENT_TIMESTAMP, updated_by=:created_by WHERE facility_id IN :ids"
     ).bindparams(bindparam('ids', expanding=True))
 
-    updates = [dict(r, facility_id=fid, created_by=CREATED_BY) for r, fid, k in plan if fid is not None]
-    inserts = [dict(r, facility_type=facility_type, created_by=CREATED_BY) for r, fid, k in plan if fid is None]
+    def params(row, **extra):
+        out = {c: row.get(c) for c in columns}
+        out.update(extra)
+        return out
+
+    updates = [params(r, facility_id=fid, created_by=CREATED_BY) for r, fid, k in plan if fid is not None]
+    inserts = [params(r, facility_type=facility_type, created_by=CREATED_BY) for r, fid, k in plan if fid is None]
     if stale_ids:
         conn.execute(delete_sql, {'ids': stale_ids, 'created_by': CREATED_BY})
     if updates:
@@ -840,9 +865,15 @@ def sync_culture_facilities(rows: List[dict]) -> dict:
     반영되며, 실패 종류는 failures 로 돌려준다.
     반환: {'db_ok', 'db_fail', 'failures': [...], 'by_type': {종류: {...}}}
     """
+    return _sync_facilities_by_type(rows, _culture_spec(), 'GG_CULTURE')
+
+
+def _sync_facilities_by_type(rows: List[dict], spec: dict, ext_sys: str) -> dict:
+    """종류별 트랜잭션으로 _sync_facility_type 을 돌린다(문화·체육·장애인복지시설 공통)."""
+    table = spec['table']
     out = {'db_ok': 0, 'db_fail': 0, 'failures': [], 'by_type': {}}
     if not rows:
-        logger.warning('%s: 수집 0건 — 적재를 건너뜀', CULTURE_TABLE)
+        logger.warning('%s: 수집 0건 — 적재를 건너뜀', table)
         return out
     if engine is None:
         raise RuntimeError('DB engine not configured (DB_URL)')
@@ -852,11 +883,11 @@ def sync_culture_facilities(rows: List[dict]) -> dict:
     for facility_type, part in by_type.items():
         try:
             with engine.begin() as conn:
-                res = _sync_culture_type(conn, facility_type, part)
+                res = _sync_facility_type(conn, spec, facility_type, part)
         except Exception as exc:     # 종류별 격리 — 이 종류만 롤백되고 다음 종류로 간다
-            logger.error('%s(%s) 적재 실패: %s', CULTURE_TABLE, facility_type, exc)
+            logger.error('%s(%s) 적재 실패: %s', table, facility_type, exc)
             out['db_fail'] += len(part)
-            out['failures'].append({'id': 'GG_CULTURE:' + facility_type, 'stage': 'db',
+            out['failures'].append({'id': ext_sys + ':' + facility_type, 'stage': 'db',
                                     'reason': ('적재 실패: %s' % exc)[:300]})
             continue
         out['by_type'][facility_type] = res
@@ -867,3 +898,178 @@ def sync_culture_facilities(rows: List[dict]) -> dict:
 def upsert_culture_facilities(rows: List[dict]) -> dict:
     """mobility_pipeline 디스패치용 — 종류별 결과 dict 를 그대로 돌려준다(실패 목록 포함)."""
     return sync_culture_facilities(rows)
+
+
+# ============================================================================
+# poi_welfare_facility — 경기 장애인복지시설 5종 (GG_WELFARE, 01 v1.14.0)
+# 키·매칭·급감 방어·종류별 격리는 문화·체육 시설과 같다(_sync_facility_type).
+# ============================================================================
+
+WELFARE_TABLE = 'poi_welfare_facility'
+
+WELFARE_COLUMNS = (
+    'sub_type', 'sido_code', 'sigun_cd', 'sigun_nm', 'name', 'addr_road', 'addr_jibun', 'zip_code',
+    'latitude', 'longitude', 'tel', 'homepage', 'capacity_cnt', 'current_cnt', 'staff_capacity_cnt',
+    'staff_current_cnt', 'install_report_dt', 'corp_name', 'source',
+)
+
+
+def _welfare_spec() -> dict:
+    return {'table': WELFARE_TABLE, 'columns': WELFARE_COLUMNS, 'accept_env': 'GG_WELFARE_ACCEPT_DROP'}
+
+
+def sync_welfare_facilities(rows: List[dict]) -> dict:
+    """poi_welfare_facility 동기화 — 종류별 트랜잭션. 반환 형식은 sync_culture_facilities 와 같다."""
+    return _sync_facilities_by_type(rows, _welfare_spec(), 'GG_WELFARE')
+
+
+# ============================================================================
+# stats_gg_dis_reg_emd — 경기 읍면동별 등록장애인 (GG_DIS_REG, 01 v1.14.0)
+# ============================================================================
+
+GG_DIS_REG_TABLE = 'stats_gg_dis_reg_emd'
+
+# 급감 방어: 한 시군의 새 판 행 수가 비교 대상(같은 판을 다시 넣으면 그 판, 아니면 그 시군의 직전 최신 판)의
+# 이 비율 미만이면 원천 장애(부분 응답)로 보고 그 시군을 건너뛴다. 확인 뒤 GG_DIS_REG_ACCEPT_DROP=<시군>.
+GG_DIS_REG_MIN_RATIO = 0.5
+
+GG_DIS_REG_COLUMNS = ('base_dt', 'sigun_nm', 'gu_nm', 'emd_nm', 'dis_type',
+                      'tot_cnt', 'male_cnt', 'female_cnt', 'sev_cnt', 'sev_male_cnt', 'sev_female_cnt',
+                      'nsev_cnt', 'nsev_male_cnt', 'nsev_female_cnt')
+
+
+def _sync_gg_dis_reg_edition(conn, sigun: str, base_dt: str, rows: List[dict]) -> dict:
+    """한 시군의 한 판(기준일)을 교체한다(호출자가 트랜잭션을 연다).
+
+    같은 (시군, 기준일) 행만 지우고 새로 넣는다. 다른 기준일의 판은 그대로 남는다.
+    반환 {'deleted', 'inserted', 'compare', 'kind'} — kind: same(같은 판 다시)·new(새 판)·first(첫 판)
+    """
+    import os
+    table = GG_DIS_REG_TABLE
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {'k': table + ':' + sigun})
+    same = conn.execute(text(
+        "SELECT count(*) FROM " + table + " WHERE sigun_nm=:s AND base_dt=CAST(:d AS date)"),
+        {'s': sigun, 'd': base_dt}).scalar() or 0
+    if same:
+        compare, kind = same, 'same'
+    else:
+        prev = conn.execute(text(
+            "SELECT count(*) FROM " + table + " WHERE sigun_nm=:s AND base_dt = ("
+            " SELECT max(base_dt) FROM " + table + " WHERE sigun_nm=:s AND base_dt < CAST(:d AS date))"),
+            {'s': sigun, 'd': base_dt}).scalar() or 0
+        compare, kind = prev, ('new' if prev else 'first')
+    accepted = {t.strip() for t in os.getenv('GG_DIS_REG_ACCEPT_DROP', '').split(',') if t.strip()}
+    if compare and len(rows) < compare * GG_DIS_REG_MIN_RATIO and sigun not in accepted and 'ALL' not in accepted:
+        raise RuntimeError('%s(%s %s): 새 판 %d행이 비교 대상 %d행의 %d%% 미만 — 원천 장애로 보고 적재 중단.'
+                           ' 실제 축소가 맞으면 GG_DIS_REG_ACCEPT_DROP=%s 로 수동 실행'
+                           % (table, sigun, base_dt, len(rows), compare, int(GG_DIS_REG_MIN_RATIO * 100), sigun))
+    deleted = conn.execute(text(
+        "DELETE FROM " + table + " WHERE sigun_nm=:s AND base_dt=CAST(:d AS date)"),
+        {'s': sigun, 'd': base_dt}).rowcount or 0
+    insert_sql = text(
+        "INSERT INTO " + table + " (" + ', '.join(GG_DIS_REG_COLUMNS) + ", created_by) VALUES (" +
+        ', '.join('CAST(:base_dt AS date)' if c == 'base_dt' else ':' + c for c in GG_DIS_REG_COLUMNS) +
+        ", :created_by)")
+    payload = [dict({c: r.get(c) for c in GG_DIS_REG_COLUMNS}, created_by=CREATED_BY) for r in rows]
+    if payload:
+        conn.execute(insert_sql, payload)
+    return {'deleted': deleted, 'inserted': len(payload), 'compare': compare, 'kind': kind}
+
+
+def sync_gg_dis_reg(rows: List[dict]) -> dict:
+    """stats_gg_dis_reg_emd 동기화 — (시군, 기준일) 판마다 트랜잭션을 따로 연다(시군별 격리).
+
+    원천에 없는 시군·기준일의 기존 판은 건드리지 않는다(원천에서 시군이 빠져도 지난 판은 남는다).
+    반환: {'db_ok', 'db_fail', 'failures': [...], 'by_type': {시군: {...}}}
+    """
+    out = {'db_ok': 0, 'db_fail': 0, 'failures': [], 'by_type': {}}
+    if not rows:
+        logger.warning('%s: 수집 0건 — 적재를 건너뜀', GG_DIS_REG_TABLE)
+        return out
+    if engine is None:
+        raise RuntimeError('DB engine not configured (DB_URL)')
+    groups: dict = {}
+    for row in rows:
+        groups.setdefault((row['sigun_nm'], row['base_dt']), []).append(row)
+    for (sigun, base_dt), part in sorted(groups.items()):
+        try:
+            with engine.begin() as conn:
+                res = _sync_gg_dis_reg_edition(conn, sigun, base_dt, part)
+        except Exception as exc:
+            logger.error('%s(%s %s) 적재 실패: %s', GG_DIS_REG_TABLE, sigun, base_dt, exc)
+            out['db_fail'] += len(part)
+            out['failures'].append({'id': 'GG_DIS_REG:' + sigun, 'stage': 'db',
+                                    'reason': ('적재 실패: %s' % exc)[:300]})
+            continue
+        out['by_type'][sigun + ' ' + base_dt] = res
+        out['db_ok'] += res['inserted']
+    news = sum(1 for r in out['by_type'].values() if r['kind'] in ('new', 'first'))
+    logger.info('%s: 판 %d개 반영(새 판 %d) · 실패 %d', GG_DIS_REG_TABLE, len(out['by_type']), news,
+                len(out['failures']))
+    return out
+
+
+# ============================================================================
+# 공개 데이터 요약표(sys_data_summary_info) 기준일 갱신 — 06 플랫폼 목록·상세의 '원천 갱신일'
+# ============================================================================
+# 수집 작업 → (요약표 sys_tbl_id, 원천 기준일을 구하는 SQL). SQL 이 None 이면 원천이 기준일을 주지 않는
+# 목록(경기데이터드림 시설 목록 — 연 1회 갱신)이라 '원천과 대조해 확인한 날'(오늘)을 쓴다.
+# 요약표에 행이 없으면(01 마이그레이션 미적용) 경고만 남긴다. KOSIS·ODCLOUD_EMP 는 각자 적재기가 갱신한다.
+_ACTIVE = "coalesce(del_yn, 'N') = 'N'"
+_BUS_DT_SQL = ("SELECT max(greatest(base_dt, low_bus_base_dt)) FROM tran_bus_route_info WHERE " + _ACTIVE)
+SUMMARY_REFRESH = {
+    # 버스는 두 작업(노선 GBIS·저상버스 GBIS_LOWFLOOR)이 한 표를 갱신한다 — 같은 식을 써서 어느 쪽이 늦게
+    # 돌아도 같은 값이 되게 한다.
+    'GBIS': ('tran_bus_route_info', _BUS_DT_SQL),
+    'GBIS_LOWFLOOR': ('tran_bus_route_info', _BUS_DT_SQL),
+    'KORAIL_CONV': ('poi_station_access_status',
+                    "SELECT max(base_dt) FROM poi_station_access_status WHERE " + _ACTIVE),
+    'KOWSI_FACL': ('poi_facility_accessibility',
+                   "SELECT max(base_dt) FROM poi_facility_accessibility WHERE " + _ACTIVE),
+    'TOUR_BF_API': ('poi_tour_bf_facility', "SELECT max(base_dt) FROM poi_tour_bf_facility WHERE " + _ACTIVE),
+    'GG_TOILET': ('poi_public_toilet_info', "SELECT max(base_dt) FROM poi_public_toilet_info WHERE " + _ACTIVE),
+    'GG_CULTURE': ('poi_culture_sports_facility', None),
+    'GG_WELFARE': ('poi_welfare_facility', None),
+    'GG_DIS_REG': ('stats_gg_dis_reg_emd', "SELECT max(base_dt) FROM stats_gg_dis_reg_emd"),
+}
+
+
+def refresh_data_summary(ext_sys: str) -> Optional[str]:
+    """수집 작업이 실패 없이 끝난 뒤 요약표의 src_latest_chn_dt(원천 기준일)·sys_data_ref_dt(확인일)를 갱신한다.
+
+    원천 기준일은 적재된 행에서 다시 구한 값으로 덮어쓴다(마이그레이션이 표가 비어 있을 때 넣은 임시 날짜도
+    첫 적재 뒤 실제 기준일로 바뀐다). 실패해도 예외를 올리지 않는다
+    (수집·적재 결과는 이미 반영됐고, 요약표는 다음 실행에서 다시 맞춰진다).
+    반환: 기록한 원천 기준일 'YYYY-MM-DD' 또는 None(대상 아님·행 없음·실패)
+    """
+    import datetime
+    spec = SUMMARY_REFRESH.get((ext_sys or '').upper())
+    if spec is None or engine is None:
+        return None
+    table, date_sql = spec
+    today = datetime.date.today().strftime('%Y-%m-%d')
+    try:
+        with engine.begin() as conn:
+            src_dt = None
+            if date_sql:
+                value = conn.execute(text(date_sql)).scalar()
+                if value is not None:
+                    src_dt = value.strftime('%Y-%m-%d') if hasattr(value, 'strftime') else str(value)[:10]
+            else:
+                src_dt = today
+            if not src_dt:
+                logger.warning('요약표 갱신 건너뜀(%s): %s 에 기준일 값이 없음', ext_sys, table)
+                return None
+            n = conn.execute(text(
+                "UPDATE sys_data_summary_info"
+                "   SET src_latest_chn_dt = :d,"
+                "       sys_data_ref_dt = :today, updated_at = CURRENT_TIMESTAMP"
+                " WHERE sys_tbl_id = :t AND del_yn = 'N'"), {'d': src_dt, 'today': today, 't': table}).rowcount
+        if not n:
+            logger.warning('요약표 갱신 건너뜀(%s): sys_data_summary_info 에 sys_tbl_id=%s 행이 없음', ext_sys, table)
+            return None
+        logger.info('요약표 갱신(%s): %s 원천 기준일 %s · 확인일 %s', ext_sys, table, src_dt, today)
+        return src_dt
+    except Exception as exc:   # 요약표 갱신 실패가 수집 결과를 실패로 만들지 않는다
+        logger.warning('요약표 갱신 실패(%s, %s): %s', ext_sys, table, exc)
+        return None
