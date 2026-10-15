@@ -149,6 +149,15 @@ class DatasetDefinitionTests(unittest.TestCase):
             self.assertFalse(set(aliases) & set(ds.ignore), ds.table)
             if ds.mode == oe.MODE_YEAR:
                 self.assertIn('year', targets, ds.table)
+            self.assertEqual(targets[-1], 'src_base_dt', ds.table)          # 모든 표에 판 기준일
+
+    def test_modes(self):
+        # 연도 칸이 없는 9개 표는 판 단위 교체, 연도 표 5개는 연도 단위 교체(v1.20.0)
+        modes = {d.table: d.mode for d in DATASETS}
+        self.assertEqual(sum(1 for m in modes.values() if m == oe.MODE_EDITION), 9)
+        self.assertEqual({t for t, m in modes.items() if m == oe.MODE_YEAR},
+                         {'emp_dis_burden_workplace', 'emp_dis_regional_status', 'emp_dis_startup_lecture',
+                          'emp_dis_obligation_by_indust', 'emp_dis_obligation_fulfillment'})
 
 
 class GateTests(unittest.TestCase):
@@ -196,6 +205,7 @@ class BuildRowsTests(unittest.TestCase):
         self.assertEqual((rows[3]['salary_type'], rows[3]['salary_amount']), (None, None))
         self.assertEqual((rows[4]['salary_type'], rows[4]['salary_amount']), ('시급', None))
         self.assertEqual(rows[0]['reg_date'], datetime.date(2024, 1, 1))
+        self.assertEqual({r['src_base_dt'] for r in rows}, {datetime.date(2024, 12, 31)})    # 모든 행에 판 기준일
         self.assertEqual(notes['nulled'], {})
 
     def test_strict_column_fails_on_bad_value_even_if_nullable(self):
@@ -207,8 +217,9 @@ class BuildRowsTests(unittest.TestCase):
     def test_old_edition_names_map_to_same_columns(self):
         ed, raw = fixture_edition('emp_dis_obligation_status')     # 08/13/2020 판(옛 칸 이름)
         rows, _ = build_rows(DATASET_BY_TABLE['emp_dis_obligation_status'], ed, raw)
+        # 이 옛 판은 기준일을 읽을 수 없는 판('_08/13/2020')이라 src_base_dt 도 None 이다(실제로는 고를 수 없는 판)
         self.assertEqual(rows[0], {'org_name': '중앙행정기관', 'workplace_count': 52, 'worker_count': 187439,
-                                   'disabled_count': 6880, 'emp_rate': Decimal('3.67')})
+                                   'disabled_count': 6880, 'emp_rate': Decimal('3.67'), 'src_base_dt': None})
 
     def test_regional_year_comes_from_edition(self):
         ed, raw = fixture_edition('emp_dis_regional_status')        # _20241231 판
@@ -355,6 +366,18 @@ class ValidateRowsTests(unittest.TestCase):
         self.assertIn('cnt 숫자 범위(integer) 초과 1건', msg)
         self.assertIn('rate 숫자 범위(numeric) 초과 1건', msg)
 
+    def test_missing_src_base_dt_column_points_to_migration(self):
+        import db_odcloud_emp as D
+        with self.assertRaisesRegex(ValueError, '01 v1.12.0'):
+            D.validate_rows('t', [{'name': 'a', 'cnt': 1, 'rate': 1, 'src_base_dt': datetime.date(2025, 1, 1)}],
+                            self.INFO)
+
+    def test_rows_must_carry_edition_date_before_touching_db(self):
+        import db_odcloud_emp as D
+        with self.assertRaisesRegex(ValueError, 'src_base_dt 가 판 기준일'):
+            D.load_dataset('t', 'edition', '/1/v1/uddi:x', datetime.date(2025, 12, 31),
+                           [{'name': 'a', 'src_base_dt': datetime.date(2024, 12, 31)}], {}, set())
+
     def test_unknown_column(self):
         import db_odcloud_emp as D
         with self.assertRaisesRegex(ValueError, '에 없는 칸: severe_integrated_care'):
@@ -402,7 +425,8 @@ class FakeDb:
         self.pinned[table] = pinned
         return {'deleted': 1, 'inserted': len(rows), 'years': [], 'tracking_updated': True}
 
-    def plan_dataset(self, table, mode, rows, accept):
+    def plan_dataset(self, table, mode, rows, accept, base_date=None):
+        self.plan_base = base_date
         self.planned.append(table)
         if table in self.fail_tables:
             return {'replace': 9, 'insert': len(rows), 'years': [], 'drop_ok': False, 'problem': '급감(시험)'}
@@ -433,6 +457,9 @@ class PipelineTests(unittest.TestCase):
             if ds.table in fetch_fail:
                 raise RuntimeError('ODCLOUD_EMP GET failed status=500')
             if ds.table == 'emp_dis_obligation_status':
+                if '기관' in ed.fields:          # 옛 판(2023-12-31)은 옛 칸 이름
+                    return [{'기관': '중앙행정기관', '대상 사업체(개소)': 56, '상시 근로자(명)': 1, '장애인(명)': 1,
+                             '고용률': '3.53'}]
                 return [{'기관명': '중앙행정기관', '대상 사업체(개소)': 56, '상시근로자수': 1, '장애인수': 1, '고용률': '3.53'}]
             return copy.deepcopy(FIXTURE['emp_dis_regional_status']['data']['data'])
 
@@ -511,6 +538,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(fake.loaded, [])
         self.assertEqual(fake.planned, list(self.TABLES))
         self.assertEqual(touched, [])
+        self.assertEqual(fake.plan_base, datetime.date(2025, 12, 31))       # 판 기준일을 넘겨 직전 판과 견준다
 
     def test_file_mode_all_plans_failing_is_total_failure(self):
         # 수집은 됐어도 적재 점검이 전부 실패하면 '전부 실패' 다(files_ok 로 판정하지 않는다)
@@ -519,16 +547,18 @@ class PipelineTests(unittest.TestCase):
 
     def test_bad_options_stop_the_run(self):
         for env in ({'ODCLOUD_EMP_ONLY': 'emp_dis_typo'}, {'ODCLOUD_EMP_FORCE': 'x'},
-                    {'ODCLOUD_EMP_EDITION': 'emp_dis_obligation_status:uddi:a'},   # 전체 교체 표는 판 지정 불가
                     {'ODCLOUD_EMP_EDITION': 'emp_dis_regional_status'}):
             with self.assertRaises(ValueError, msg=env):
                 self._run(env=env)
 
     def test_pinned_edition_for_year_table(self):
         out, fake, _ = self._run(env={'ODCLOUD_EMP_EDITION':
-                                      'emp_dis_regional_status:uddi:99d5ad7e-0487-4b08-adca-f7da5d8859a4'})
+                                      'emp_dis_regional_status:uddi:99d5ad7e-0487-4b08-adca-f7da5d8859a4,'
+                                      'emp_dis_obligation_status:uddi:6669de84-f0af-46da-a0b0-f3f2a5b3593c'})
+        # v1.20.0: 연도 없는 표도 판 지정(지난 판 보충)을 받는다
+        self.assertEqual(out['by_table']['emp_dis_obligation_status']['base_date'], '2023-12-31')
         self.assertEqual(out['by_table']['emp_dis_regional_status']['base_date'], '2024-12-31')
-        self.assertEqual(fake.pinned, {'emp_dis_regional_status': True, 'emp_dis_obligation_status': False})
+        self.assertEqual(fake.pinned, {'emp_dis_regional_status': True, 'emp_dis_obligation_status': True})
 
     def test_missing_ext_row_is_fatal(self):
         import odcloud_emp_pipeline as P
@@ -588,6 +618,9 @@ class AlertTextTests(unittest.TestCase):
             [{'reason': '구인 정보 수집 실패: 칸 검사 실패: 대응표에 없는 칸'},
              {'reason': '... ODCLOUD_EMP_ACCEPT_DROP=emp_dis_job_posting 로 수동 실행'}])
         self.assertEqual(len(hints), 2)
+        hints = ops_alert.matching_action_hints(
+            [{'reason': '적재 실패: t 에 src_base_dt(원천 판 기준일) 칸이 없음 — 01 v1.12.0 적용 필요'}])
+        self.assertTrue(any('01 v1.12.0' in h for h in hints))
 
 
 if __name__ == '__main__':

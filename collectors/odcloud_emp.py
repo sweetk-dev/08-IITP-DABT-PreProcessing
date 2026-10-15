@@ -1,4 +1,4 @@
-"""공공데이터포털 장애인 고용 파일데이터 14종 정기 수집 어댑터 — ODCLOUD_EMP (v1.19.0).
+"""공공데이터포털 장애인 고용 파일데이터 14종 정기 수집 어댑터 — ODCLOUD_EMP (v1.19.0 · 판 보존 v1.20.0).
 
 배경
     emp_dis_* 표 15종은 2025-07 에 공공데이터포털(data.go.kr) 파일데이터를 한 번 받아 넣은 뒤
@@ -30,9 +30,11 @@
         건수를 기록한다(로그·실행 결과).
 
 적재 방식(이 모듈은 행을 만들 뿐, 적재는 db_odcloud_emp)
+    모든 행에 src_base_dt = 판 기준일을 넣는다(01 v1.12.0). 지난 판을 지우지 않고 남기기 위해서다.
     MODE_YEAR    연도 칸이 있는 표 — 새 판에 들어 있는 연도의 행만 지우고 다시 넣는다(다른 연도 보존).
                  연도 칸이 원천에 없는 지역별 고용 현황은 판의 기준일 연도를 연도로 쓴다.
-    MODE_REPLACE 연도 칸이 없는 표 — 표 전체를 새 판으로 바꾼다(최신 판 = 현재 상태).
+    MODE_EDITION 연도 칸이 없는 표 — 같은 판 기준일의 행만 지우고 다시 넣는다(다른 판 보존, v1.20.0).
+                 (v1.19.0 의 MODE_REPLACE — 표 전체 교체 — 는 지난 판을 지워 버려 바꿨다.)
 
 인증키 마스킹
     serviceKey 는 URL 쿼리에 실린다. 로그·예외 메시지는 BaseCollector.http_get 과 file_utils 의
@@ -63,7 +65,7 @@ DEFAULT_BASE_URL = 'https://api.odcloud.kr/api'
 DEFAULT_PAGE_SIZE = 1000
 MAX_PAGE_SIZE = 10000
 
-MODE_REPLACE = 'replace'
+MODE_EDITION = 'edition'   # v1.20.0 — 판 단위 교체(이전 이름 MODE_REPLACE: 표 전체 교체)
 MODE_YEAR = 'year'
 # MODE_YEAR 에서 연도를 어디서 얻는가
 YEAR_FROM_COLUMN = 'column'    # 원천의 연도 칸(대응표의 'year')
@@ -253,7 +255,7 @@ class Dataset:
     table      : 적재 표(emp_dis_*). sys_stats_src_api_info.stat_tbl_id 와 같은 값.
     data_id    : 공공데이터포털 데이터 ID(odcloud namespace). 데이터셋 이름이 바뀌어도 ID 는 그대로다.
     label      : 화면·메일용 짧은 이름.
-    mode       : MODE_REPLACE | MODE_YEAR
+    mode       : MODE_EDITION | MODE_YEAR
     year_from  : MODE_YEAR 일 때 연도 출처(YEAR_FROM_COLUMN | YEAR_FROM_EDITION).
     cols       : 원천 칸 대응표.
     ignore     : 알고 있지만 표에 칸이 없어 싣지 않는 원천 칸 {이름: 사유}.
@@ -276,6 +278,7 @@ class Dataset:
             out.extend(c.targets)
         if self.mode == MODE_YEAR and self.year_from == YEAR_FROM_EDITION:
             out.append('year')
+        out.append('src_base_dt')       # 모든 행에 판 기준일(01 v1.12.0)
         return tuple(out)
 
 
@@ -287,7 +290,7 @@ def _c(target, *aliases, conv=conv_str, required=True, null_ok=False, strict=Fal
 # 순서 = 수집 순서. 큰 데이터셋(구직자·구인)을 앞에 두어 일일 호출 한도 문제를 먼저 드러낸다.
 DATASETS: Tuple[Dataset, ...] = (
     Dataset(
-        table='emp_dis_jobseeker_status', data_id=15014774, label='구직자 현황', mode=MODE_REPLACE,
+        table='emp_dis_jobseeker_status', data_id=15014774, label='구직자 현황', mode=MODE_EDITION,
         cols=(
             _c('seq_no', '연번', conv=conv_int),
             _c('reg_date', '구직등록일', conv=conv_date),
@@ -303,7 +306,7 @@ DATASETS: Tuple[Dataset, ...] = (
         ),
     ),
     Dataset(
-        table='emp_dis_job_posting', data_id=3072637, label='구인 정보', mode=MODE_REPLACE,
+        table='emp_dis_job_posting', data_id=3072637, label='구인 정보', mode=MODE_EDITION,
         cols=(
             _c('seq_no', '연번', conv=conv_int),
             _c('apply_date', '구인신청일자', conv=conv_date),
@@ -327,7 +330,7 @@ DATASETS: Tuple[Dataset, ...] = (
         ),
     ),
     Dataset(
-        table='emp_dis_center_usage', data_id=15118552, label='발달장애인훈련센터 이용', mode=MODE_REPLACE,
+        table='emp_dis_center_usage', data_id=15118552, label='발달장애인훈련센터 이용', mode=MODE_EDITION,
         cols=(
             _c('train_org', '기관구분명'),
             # 2025-07 첫 적재 때부터 '수료인원수' 를 user_count 에 넣어 왔다(칸 이름은 이용자 수).
@@ -339,7 +342,7 @@ DATASETS: Tuple[Dataset, ...] = (
         unique=('train_org',),
     ),
     Dataset(
-        table='emp_dis_obligation_status', data_id=15014785, label='고용의무 현황', mode=MODE_REPLACE,
+        table='emp_dis_obligation_status', data_id=15014785, label='고용의무 현황', mode=MODE_EDITION,
         cols=(
             _c('org_name', '기관명', '기관'),
             _c('workplace_count', '대상 사업체(개소)', conv=conv_int),
@@ -349,7 +352,7 @@ DATASETS: Tuple[Dataset, ...] = (
         ),
     ),
     Dataset(
-        table='emp_dis_consulting_his', data_id=15014777, label='고용컨설팅', mode=MODE_REPLACE,
+        table='emp_dis_consulting_his', data_id=15014777, label='고용컨설팅', mode=MODE_EDITION,
         cols=(
             _c('seq_no', '순번', conv=conv_int),
             _c('diagnosis_no', '진단번호'),
@@ -393,7 +396,7 @@ DATASETS: Tuple[Dataset, ...] = (
     ),
     Dataset(
         # 데이터셋 이름이 '고용개발원 교육정보' → '장애인고용 전문인력 양성교육정보' 로 바뀌었다(ID 는 같음).
-        table='emp_dis_staff_train_crs', data_id=15004132, label='전문인력 양성교육', mode=MODE_REPLACE,
+        table='emp_dis_staff_train_crs', data_id=15004132, label='전문인력 양성교육', mode=MODE_EDITION,
         cols=(
             _c('course_type', '구분'),
             _c('course_name', '교육연수과정명'),
@@ -410,7 +413,7 @@ DATASETS: Tuple[Dataset, ...] = (
         ),
     ),
     Dataset(
-        table='emp_dis_dev_support_org', data_id=15072489, label='발달장애인 지원기관', mode=MODE_REPLACE,
+        table='emp_dis_dev_support_org', data_id=15072489, label='발달장애인 지원기관', mode=MODE_EDITION,
         cols=(
             _c('seq_no', '일련번호', '연번', conv=conv_int),
             _c('region', '시군구명', '시군구'),
@@ -451,7 +454,7 @@ DATASETS: Tuple[Dataset, ...] = (
         ),
     ),
     Dataset(
-        table='emp_dis_std_workplace', data_id=3033670, label='표준사업장', mode=MODE_REPLACE,
+        table='emp_dis_std_workplace', data_id=3033670, label='표준사업장', mode=MODE_EDITION,
         cols=(
             _c('cert_no', '인증번호'),
             _c('company_name', '사업체명'),
@@ -467,7 +470,7 @@ DATASETS: Tuple[Dataset, ...] = (
         ),
     ),
     Dataset(
-        table='emp_dis_emp_incentive', data_id=15121124, label='신규고용장려금', mode=MODE_REPLACE,
+        table='emp_dis_emp_incentive', data_id=15121124, label='신규고용장려금', mode=MODE_EDITION,
         cols=(
             _c('region', '지역명', '시도구분'),
             _c('industry', '업종명', '업종'),
@@ -675,6 +678,8 @@ def build_rows(ds: Dataset, edition: Edition, raw_rows: Sequence[dict], max_samp
                 row[col.target] = converted
         if ds.mode == MODE_YEAR and ds.year_from == YEAR_FROM_EDITION:
             row['year'] = edition_year
+        # 이 행을 넣은 판의 기준일 — 판 단위 교체(MODE_EDITION)의 기준이고, 연도 표에서도 연도별 출처가 된다.
+        row['src_base_dt'] = edition.base_date
         rows.append(row)
 
     if errors:
