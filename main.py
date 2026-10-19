@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # preserved: with ext_sys defaulting to 'KOSIS', the legacy save path and the
 # collector behavior are identical to v1.4.0.
 # ============================================================================
-__version__ = "1.17.0"
+__version__ = "1.21.0"
 
 
 
@@ -45,6 +45,11 @@ __version__ = "1.17.0"
 # 설계 근거: docs/design/26-multi-source-architecture.md §5 마이그레이션 플랜
 # 후방호환 전략: §2.4 — KOSIS 호출 경로는 어댑터를 거쳐도 동일한 응답 형태 유지.
 DEFAULT_EXT_SYS = 'KOSIS'
+
+# v1.19.0: 장애인 고용 파일데이터 14종(odcloud) — 데이터셋별 격리 수집기(odcloud_emp_pipeline).
+# 요약 모양이 이동편의 흐름과 같아 같은 갈래에서 처리한다. 모듈은 이 작업을 실행할 때만 불러온다 —
+# 새 모듈에 문제가 있어도 KOSIS·이동편의 등 다른 정기 작업의 시작(import)에는 영향이 없게 하기 위해서다.
+ODCLOUD_EMP_EXT_SYS = 'ODCLOUD_EMP'
 
 # DATA_COLLECTION_SCOPE 허용값. 그 외 값은 실행 중단(조용한 ALL 폴백 제거).
 ALLOWED_DATA_COLLECTION_SCOPES = ('ALL', 'PARTIAL')
@@ -420,22 +425,35 @@ def main():
         logging.info(f"수집 외부 시스템: ext_sys={ext_sys}")
 
         # 이슈 #76: 이동편의 소스는 통계(stats_*) 흐름과 별개 파이프라인으로 위임
-        if ext_sys in MOBILITY_EXT_SYS:
-            mob = run_mobility(ext_sys, args.mode)
+        # v1.19.0: 고용 파일데이터(ODCLOUD_EMP)도 같은 요약 모양으로 돌려주므로 같은 갈래에서 처리한다.
+        if ext_sys in MOBILITY_EXT_SYS or ext_sys == ODCLOUD_EMP_EXT_SYS:
+            if ext_sys == ODCLOUD_EMP_EXT_SYS:
+                from odcloud_emp_pipeline import run_odcloud_emp
+                mob = run_odcloud_emp(args.mode)
+                # 일부 표만 돌린 수동 실행(ODCLOUD_EMP_ONLY)은 KOSIS 의 PARTIAL 과 같이 알림 대상이 아니다.
+                run_scope = mob.get('run_scope') or 'ALL'
+            else:
+                mob = run_mobility(ext_sys, args.mode)
             summary['targets'] = mob['targets']
             summary['files_ok'] = mob['files_ok']
             summary['db_ok'] = mob['db_ok']
             summary['db_fail'] = mob['db_fail']
             summary['status'] = 'SUCCESS'
             exit_code = 0
-            if mob.get('db_fail'):
+            if mob.get('failures'):
+                # 종류별 격리 수집기(GG_CULTURE·ODCLOUD_EMP): 실패한 종류만 실패 목록에 싣고 나머지는 반영된 상태다.
+                summary['status'] = 'PARTIAL'
+                exit_code = 2
+                alert_failures.extend(mob['failures'])
+                summary['error'] = 'partial:' + ','.join(str(f.get('id')) for f in mob['failures'])[:300]
+            elif mob.get('db_fail'):
                 # 적재 실패 건이 있으면 KOSIS 와 같은 규약(실패가 1건이라도 있으면 부분 완료, 종료코드 2)을 쓴다.
                 # SUCCESS 로 두면 기록·알림이 이 실행을 성공으로 보고, 직전이 실패였다면 정상화 메일까지 나간다.
                 summary['status'] = 'PARTIAL'
                 exit_code = 2
                 alert_failures.append({'id': ext_sys, 'stage': 'db',
                                        'reason': f"적재 실패 {mob['db_fail']}건(상세는 서버 로그)"})
-            logging.info("이동편의 수집 파이프라인 완료 (ext_sys=%s)", ext_sys)
+            logging.info("행 단위 수집 파이프라인 완료 (ext_sys=%s)", ext_sys)
         else:
             data_collection_scope = get_data_collection_scope()
             run_scope = data_collection_scope

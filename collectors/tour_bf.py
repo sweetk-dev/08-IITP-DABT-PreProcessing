@@ -13,17 +13,30 @@ Issue #76. areaBasedList2(지역 목록) + detailWithTour2(무장애 편의정�
    평촌중앙공원·산타루치아 4건이 실제로 뒤집혀 있었다.
 2. 접근로 정본인 ``route`` 필드를 아예 매핑하지 않았다. 안양 11건 중 route 는 10건,
    exit 는 8건 보유로 route 쪽이 더 잘 채워져 있다. slope_yn 은 route 우선으로 본다.
+
+2026-10-13 (v1.17.1, #120): 목록 조회를 법정동 코드로 바꿨다.
+   종전에는 옛 지역 코드(areaCode=31·sigunguCode=17)로 조회했다. 원천이 법정동 코드
+   (lDongRegnCd·lDongSignguCd)로 옮겨 가면서 새로 등록·수정된 장소는 옛 시군구 코드가
+   비어 이 조건에 걸리지 않았고, 수집 건수가 10 → 9 → 8 로 줄었다. 같은 날 법정동 코드로
+   조회하면 만안구(171) 10건 · 동안구(173) 25건이다. 시는 구 단위 코드만 있으므로 구마다
+   조회해 합치고 contentid 로 중복을 없앤다. 분류(관광지·음식점·쇼핑 등)는 거르지 않는다 —
+   이 표는 관광 POI 에 무장애 속성을 덧씌우고 시설 내 장애인화장실을 찾는 데 쓰이며,
+   추천 분류 거르기는 소비처(경로 서비스 category)가 한다.
 """
 from __future__ import annotations
 
 import datetime
 import json
 import os
+import re
 from typing import List, Optional
 
 from collectors.mobility_base import MobilityCollector
 
 GYEONGGI_INTERNAL_SIDO = '9410000'  # sys_common_code sido_code (내부용, prefix 9)
+LIST_PAGE_SIZE = 100
+# 구 하나의 무장애 장소는 수십 건이다. 이 상한을 넘으면 응답 이상으로 본다.
+LIST_MAX_PAGES = 20
 
 # detailWithTour2 응답 필드 → poi_tour_bf_facility 컬럼 (1:1 매핑분)
 DETAIL_FIELD_MAP = {
@@ -90,22 +103,32 @@ class TourBfCollector(MobilityCollector):
     DEFAULT_BASE_URL = 'https://apis.data.go.kr/B551011/KorWithService2'
 
     @property
-    def area_code(self) -> str:
-        return os.getenv('TOUR_AREA_CODE', '31')
+    def ldong_regn_cd(self) -> str:
+        """법정동 시도 코드(경기 41)."""
+        code = os.getenv('TOUR_LDONG_REGN_CD', '41').strip()
+        if not re.fullmatch(r'\d{1,5}', code):
+            raise ValueError('TOUR_LDONG_REGN_CD 는 숫자 코드여야 합니다: %r' % code)
+        return code
 
     @property
-    def sigungu_code(self) -> str:
-        return os.getenv('TOUR_SIGUNGU_CODE', '17')
+    def ldong_signgu_cds(self) -> List[str]:
+        """법정동 시군구 코드 목록(안양 만안구 171 · 동안구 173). 쉼표로 여러 개."""
+        raw = os.getenv('TOUR_LDONG_SIGNGU_CDS', '171,173')
+        codes = [c.strip() for c in raw.split(',') if c.strip()]
+        bad = [c for c in codes if not re.fullmatch(r'\d{1,5}', c)]
+        if bad or not codes:
+            raise ValueError('TOUR_LDONG_SIGNGU_CDS 는 쉼표로 구분한 숫자 코드여야 합니다: %r' % raw)
+        return codes
 
     def _common_qs(self) -> str:
         return ('serviceKey=' + self.api_key
                 + '&MobileOS=ETC&MobileApp=iitp-dabt&_type=json')
 
-    def _list_url(self, page_no: int) -> str:
+    def _list_url(self, signgu_cd: str, page_no: int) -> str:
         return (self.base_url + '/areaBasedList2?' + self._common_qs()
-                + '&areaCode=' + self.area_code
-                + '&sigunguCode=' + self.sigungu_code
-                + '&numOfRows=100&pageNo=' + str(page_no))
+                + '&lDongRegnCd=' + self.ldong_regn_cd
+                + '&lDongSignguCd=' + signgu_cd
+                + '&numOfRows=' + str(LIST_PAGE_SIZE) + '&pageNo=' + str(page_no))
 
     def _detail_url(self, content_id) -> str:
         return (self.base_url + '/detailWithTour2?' + self._common_qs()
@@ -113,22 +136,55 @@ class TourBfCollector(MobilityCollector):
 
     @staticmethod
     def _body(data: dict) -> dict:
-        return ((data or {}).get('response') or {}).get('body') or {}
+        """응답 본문. 결과 코드가 정상(0000)이 아니면 예외 — 빈 목록으로 오인해 적재·논리삭제
+        판단을 하지 않도록 수집 실패로 올린다."""
+        response = (data or {}).get('response') or {}
+        header = response.get('header') or {}
+        code = str(header.get('resultCode') or '').strip()
+        # 결과 코드가 없는 응답도 정상으로 보지 않는다 — 게이트웨이 오류 본문이 JSON 으로
+        # 와서 구 하나가 0건이 되면, 나머지 구만으로 절반 기준을 넘겨 멀쩡한 장소를 지운다.
+        if code not in ('0000', '00'):
+            raise RuntimeError('TOUR_BF_API 오류 응답: resultCode=%s %s'
+                               % (code or '(없음)', str(header.get('resultMsg') or '')[:100]))
+        return response.get('body') or {}
 
-    def fetch_area_list(self) -> List[dict]:
+    def _fetch_signgu(self, signgu_cd: str) -> List[dict]:
         items: List[dict] = []
         page = 1
         while True:
-            body = self._body(self.get_json(self._list_url(page)))
+            body = self._body(self.get_json(self._list_url(signgu_cd, page)))
             chunk = (body.get('items') or {}).get('item') or []
             if isinstance(chunk, dict):
                 chunk = [chunk]
             items.extend(chunk)
-            total = int(body.get('totalCount') or 0)
-            if len(items) >= total or not chunk:
+            try:
+                total = int(body.get('totalCount') or 0)
+            except (TypeError, ValueError):
+                total = 0
+            # totalCount 가 비어 오는 응답도 있다 — 그때는 쪽이 꽉 찼는지로 다음 쪽을 판단한다.
+            if not chunk or len(chunk) < LIST_PAGE_SIZE or (total and len(items) >= total):
                 break
+            if page >= LIST_MAX_PAGES:
+                raise RuntimeError('TOUR_BF_API 목록이 %d쪽을 넘음 — 응답 이상으로 보고 중단 (lDongSignguCd=%s)'
+                                   % (LIST_MAX_PAGES, signgu_cd))
             page += 1
             self.pause()
+        return items
+
+    def fetch_area_list(self) -> List[dict]:
+        """시군구 코드마다 목록을 받아 합친다. 같은 contentid 는 처음 것만 남긴다."""
+        items: List[dict] = []
+        seen = set()
+        for i, signgu_cd in enumerate(self.ldong_signgu_cds):
+            if i:
+                self.pause()
+            for item in self._fetch_signgu(signgu_cd):
+                cid = str(item.get('contentid') or '').strip()
+                if cid:
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
+                items.append(item)
         return items
 
     def fetch_detail(self, content_id) -> dict:
