@@ -1,5 +1,5 @@
 import logging
-from sqlalchemy import create_engine, text, event
+from sqlalchemy import bindparam, create_engine, text, event
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 from config import get_db_url
@@ -181,8 +181,12 @@ def get_stats_src_data_info(ext_api_id, stat_tbl_id_list):
                 SELECT src_data_id, ext_api_id, ext_sys, stat_api_id, intg_tbl_id, stat_title, stat_org_id, stat_survey_name, stat_pub_dt, periodicity, collect_start_dt, collect_end_dt, stat_tbl_id, stat_tbl_name, stat_latest_chn_dt, stat_data_ref_dt, avail_cat_cols, status, del_yn
                 FROM stats_src_data_info
                 WHERE ext_api_id = :ext_api_id AND stat_tbl_id IN :stat_tbl_id_list AND del_yn = 'N' AND status = 'A'
-            """)
-            result = session.execute(query, {'ext_api_id': ext_api_id, 'stat_tbl_id_list': tuple(stat_tbl_id_list)})
+            """).bindparams(bindparam('stat_tbl_id_list', expanding=True))
+            # expanding=True: SQLAlchemy 가 목록을 IN (:p_1, :p_2, ...) 처럼 값 개수만큼 펼친 뒤 드라이버에 넘긴다.
+            # 튜플을 그대로 넘기면 psycopg2 는 클라이언트에서 ('a','b') 로 펼쳐 주지만, psycopg(3) 는 서버 측
+            # 파라미터로 보내 'IN $2' 가 되어 SQL 문법 오류가 난다(SQLAlchemy 2.1 은 postgresql:// 의 기본 드라이버가
+            # psycopg). 같은 형태의 db_mobility·db_odcloud_emp 조회와 같은 방식으로 맞춘다.
+            result = session.execute(query, {'ext_api_id': ext_api_id, 'stat_tbl_id_list': list(stat_tbl_id_list)})
         rows = result.fetchall()
         info_dict = {str(row.stat_tbl_id): dict(row._mapping) for row in rows}
         db_logger.info(f"stats_src_data_info 일괄 조회 성공: {len(info_dict)}건")

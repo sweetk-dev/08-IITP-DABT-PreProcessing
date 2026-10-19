@@ -115,5 +115,56 @@ class GetApiInfoNonKosisPathTests(unittest.TestCase):
         self.assertEqual(out, {})
 
 
+
+class GetStatsSrcDataInfoTests(unittest.TestCase):
+    """get_stats_src_data_info — 통계표 ID 목록 조회가 DB 드라이버와 무관하게 동작하는지 (이슈 #133)
+
+    다건 조회의 ``IN :stat_tbl_id_list`` 는 expanding 바인딩이어야 한다. 튜플을 그대로 넘기면
+    psycopg(3) 드라이버에서 ``IN $2`` 로 전송되어 SQL 문법 오류가 난다.
+    """
+
+    def _stub_module(self, rows):
+        import db as _db
+        fake_session = MagicMock()
+        fake_result = MagicMock()
+        fake_result.fetchall.return_value = rows
+        fake_session.execute.return_value = fake_result
+        _db.Session = MagicMock(return_value=fake_session)
+        return _db, fake_session
+
+    @staticmethod
+    def _row(stat_tbl_id):
+        row = _FakeRow(stat_tbl_id=stat_tbl_id)
+        row._mapping = {'stat_tbl_id': stat_tbl_id}
+        return row
+
+    def test_multi_ids_use_expanding_bind(self):
+        db_mod, fake_session = self._stub_module([self._row('DT_A'), self._row('DT_B')])
+        out = db_mod.get_stats_src_data_info(13, ['DT_A', 'DT_B'])
+        self.assertEqual(sorted(out), ['DT_A', 'DT_B'])
+        query, params = fake_session.execute.call_args[0]
+        self.assertTrue(query._bindparams['stat_tbl_id_list'].expanding)
+        self.assertEqual(params['stat_tbl_id_list'], ['DT_A', 'DT_B'])
+
+    def test_multi_ids_compile_to_expanded_in(self):
+        """PostgreSQL 방언으로 컴파일하면 IN 목록이 값 개수만큼 펼쳐져야 한다"""
+        from sqlalchemy.dialects import postgresql
+        db_mod, fake_session = self._stub_module([])
+        db_mod.get_stats_src_data_info(13, ['DT_A', 'DT_B', 'DT_C'])
+        query, params = fake_session.execute.call_args[0]
+        compiled = query.bindparams(**params).compile(
+            dialect=postgresql.dialect(), compile_kwargs={'render_postcompile': True})
+        sql = ' '.join(str(compiled).split())
+        self.assertIn('stat_tbl_id IN (', sql)
+        self.assertEqual(sql.count('stat_tbl_id_list_'), 3)
+
+    def test_single_id_uses_equality(self):
+        db_mod, fake_session = self._stub_module([self._row('DT_A')])
+        out = db_mod.get_stats_src_data_info(13, ['DT_A'])
+        self.assertEqual(list(out), ['DT_A'])
+        query, params = fake_session.execute.call_args[0]
+        self.assertEqual(params, {'ext_api_id': 13, 'stat_tbl_id': 'DT_A'})
+
+
 if __name__ == '__main__':
     unittest.main()
