@@ -131,7 +131,7 @@ class LoadDisDbTests(unittest.TestCase):
         self._seed(STAT_T, [pension(2023, '경기', 5, D0), pension(2024, '경기', 6, D0)])
         res = self._load(self.ds_s, [pension(2024, '경기', 7), pension(2024, '서울', 8)])
         self.assertEqual((res['deleted'], res['inserted'], res['years']), (1, 2, [2024]))
-        got = self._q('SELECT year, sido, basic_living_general FROM %s ORDER BY 1, 2 COLLATE "C"' % STAT_T)
+        got = self._q('SELECT year, sido, basic_living_general FROM %s ORDER BY year, sido COLLATE "C"' % STAT_T)
         self.assertEqual(got, [(2023, '경기', 5), (2024, '경기', 7), (2024, '서울', 8)])
 
 
