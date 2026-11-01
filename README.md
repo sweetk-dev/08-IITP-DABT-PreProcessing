@@ -1,6 +1,6 @@
 # 장애인 이동편의 공공데이터 멀티소스 수집·전처리 툴
 
-![version](https://img.shields.io/badge/version-v1.21.0-blue)
+![version](https://img.shields.io/badge/version-v1.22.0-blue)
 
 ## 개요
 장애인 이동편의·편의시설 관련 공공데이터를 소스별 수집 어댑터로 수집해, 파일 저장·정제·DB 적재까지 처리하는 Python 기반 툴입니다.
@@ -13,6 +13,8 @@
 - 현행 아키텍처: [docs/design/107-current-architecture.md](docs/design/107-current-architecture.md)
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
+
+> v1.22.0 — 공공데이터포털 **장애인 파일데이터 22종** 정기 수집기 `ODCLOUD_DIS` 추가. 1차년도에 파일로 한 번 받아 두고 DB 에 없던 고용 기록·실적 11종, 시도별 복지 통계 3종, BF 인증 시설, 지원기관 목록 7종을 같은 원천의 최신 판으로 매월 확인해 적재한다. 고용 14종 수집기(`ODCLOUD_EMP`)의 명세·판·칸 검사·값 변환을 그대로 쓰고, 목록형 원천의 종류별 교체와 원천별 고유 칸(`detail` JSON)을 더했다. 01 v1.17.0 과 함께 적용한다. 아래 「장애인 파일데이터 적재」 참고.
 
 > v1.20.1 — 고용 파일데이터 **지난 판 보충 준비**. 옛 판 이름의 기준일 표기 `_08/13/2020`(월/일/연)·`(2018년)`·`(2014년도)`(연도만 — 그해 12-31 로 본다)도 읽고, 지난 판에서 이름만 바뀐 칸(구인 정보 `일련번호`·`직종명`·`통상임금`·`구인등록일` 등, 훈련센터 `양성과정 이용자수`, 고용의무 `고용률(%)`, 연계고용 `연계고용사업장명`·`사업장유형`, 전문인력 양성교육 `과정명`·`교육시작일` 등, 표준사업장 `비고`)을 대응표에 별칭으로 더했다. 칸이 아예 없거나 구조가 다른 옛 판은 그대로 칸 검사에서 멈춘다.
 
@@ -387,6 +389,43 @@ ODCLOUD_EMP_ONLY=emp_dis_regional_status ODCLOUD_EMP_EDITION=emp_dis_regional_st
 
 # crontab 예시 — 매월 3일 04:40 (원천 갱신은 연 1~2회, 판이 그대로면 명세 14회 조회로 끝난다)
 40 4 3 * * cd <PROJECT_DIR> && .venv/bin/python main.py --mode db --ext-sys ODCLOUD_EMP >> logs/cron.log 2>&1
+```
+
+## 장애인 파일데이터 적재 (공공데이터포털 `ODCLOUD_DIS`, v1.22.0)
+
+1차년도(2024)에 공공데이터포털에서 파일로 받아 두고 DB 에 없던 장애인 관련 자료 22종을, 같은 원천의 최신 판으로 매월 수집한다.
+원천·명세·판 고르기·칸 검사·값 변환은 위 「장애인 고용 파일데이터 적재」와 같다(`collectors/odcloud_emp.py` 의 부품 재사용).
+**공공데이터포털 파일데이터 OpenAPI 는 데이터셋마다 활용신청이 있어야 응답한다** — 안 된 데이터셋은 `failed status=401` 로 그것만 실패하고 나머지는 계속한다(알림 메일에 활용신청 안내).
+
+```bash
+python main.py --mode file --ext-sys ODCLOUD_DIS   # 수집·칸 검사·변환 + "무엇이 바뀔지" 계산만(DB 쓰기 없음)
+python main.py --mode db   --ext-sys ODCLOUD_DIS   # 판이 바뀐 데이터셋만 적재
+```
+
+| 묶음 | 표 | 적재 방식 |
+|---|---|---|
+| 고용 기록·실적 11종 | `emp_dis_employment_info`(15088956) · `emp_dis_work_support_cost`(3072377) · `emp_dis_placement_subsidy`(15014780) · `emp_dis_vehicle_support`(15053954) · `emp_dis_loan_support`(3072380) · `emp_dis_levy_report`(3072370) · `emp_dis_incentive_company`(15054713) · `emp_dis_noncompliance_list`(15014779) | 판 보존 — 같은 판(`src_base_dt`)의 행만 교체, 읽을 때 최신 판으로 거른다 |
+| | `emp_dis_supported_emp`(15046221, 계획년도) · `emp_dis_counselor_obligation`(15119194, 기준연도) · `emp_dis_job_program_edu`(15137610, 교육연도) | 판에 실린 연도의 행만 교체 |
+| 시도별 복지 통계 3종 | `stats_dis_alone_service_sido`(15127844) · `stats_dis_allowance_sido`(15001632) · `stats_dis_pension_sido`(15044286) | 연도별 교체, (연도, 시도) 겹치면 실패 |
+| BF 인증 시설 | `poi_bf_certification`(15014781) | 최신 판으로 표 교체 |
+| 지원기관 목록 7종 | `poi_dis_support_org` — `org_type` = `workaid_edu`(15118857) · `aware_instructor`(15104256) · `aware_edu`(15037836) · `job_program`(3051090) · `voc_rehab`(3051092) · `job_center`(15066368) · `lifelong_edu`(3057850) | 종류별로 최신 판 교체. 공통 칸(이름·구분·시도·시군구·주소·전화·홈페이지) 밖의 원천 칸은 `detail` JSON 에 원천 칸 이름 그대로 |
+
+- 판 추적 키(`sys_stats_src_api_info.stat_tbl_id`)는 표 이름, 지원기관 목록은 `poi_dis_support_org:<종류>`
+- `detail` 로 담기로 한 칸은 판에 없어도 실패하지 않는다. 대응표·`detail` 어디에도 없는 새 칸이 생기면 고용 수집기처럼 그 데이터셋만 실패시킨다
+- 급감 방어: 새 행이 비교 대상(직전 판·같은 연도·기존 목록)의 50% 미만이면 그 데이터셋 중단 → 확인 뒤 `ODCLOUD_DIS_ACCEPT_DROP=<키>` 로 수동 실행
+- 원본 보존: `ext_data/ODCLOUD_DIS/<날짜>/<키>_<기준일>.json` (`:` 는 `__`)
+- 공개 데이터 요약표(`sys_data_summary_info`) 행이 없는 표는 요약표를 건드리지 않는다(06 플랫폼·OPEN API 노출 전). 행이 생기면 기준일·적재일을 갱신한다
+
+| 환경변수(명령줄에만) | 동작 |
+|---|---|
+| `ODCLOUD_DIS_ONLY=<키>[,<키>]` | 이 데이터셋만 실행. 일부 실행이라 알림·전체 동기화 시각 갱신 없음 |
+| `ODCLOUD_DIS_FORCE=<키>[,..]` 또는 `ALL` | 판이 그대로여도 다시 적재 |
+| `ODCLOUD_DIS_ACCEPT_DROP=<키>[,..]` 또는 `ALL` | 행 수 급감 방어를 이번만 허용 |
+| `ODCLOUD_DIS_API_KEY` | DB(`sys_ext_api_info`)에 키가 없을 때 쓰는 공공데이터포털 키 (쪽 크기·상한은 `ODCLOUD_EMP_PAGE_SIZE`·`ODCLOUD_EMP_MAX_PAGES` 를 함께 쓴다) |
+
+```bash
+# crontab 예시 — 매월 3일 05:00 (고용 14종 04:40 뒤)
+0 5 3 * * cd <PROJECT_DIR> && .venv/bin/python main.py --mode db --ext-sys ODCLOUD_DIS >> logs/cron.log 2>&1
 ```
 
 ## 스케줄러 실행 (정기 수집)
