@@ -10,6 +10,8 @@ GBIS_LOWFLOOR 는 저상버스 노선현황 페이지(전일 기준)를 읽어 t
 갱신한다 (Issue #97) — 매일 1회 실행 대상.
 실패 없이 끝나면 동기화 시각과 함께 공개 데이터 요약표(sys_data_summary_info)의 원천 기준일을
 갱신한다(v1.21.0, db_mobility.SUMMARY_REFRESH).
+STD_CALLTAXI 는 전국 교통약자이동지원센터 표준데이터를 poi_emergency_support(calltaxi)에 원천 단위로
+동기화한다(v1.23.0).
 """
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ from collectors.gg_toilet import GgToiletCollector
 from collectors.gg_welfare import GgWelfareCollector
 from collectors.korail_conv import KorailConvCollector
 from collectors.kowsi_facl import KowsiFaclCollector
+from collectors.std_calltaxi import StdCalltaxiCollector
 from collectors.tour_bf import TourBfCollector
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,7 @@ MOBILITY_COLLECTORS = {
     'GG_WELFARE': GgWelfareCollector,
     'KORAIL_CONV': KorailConvCollector,
     'KOWSI_FACL': KowsiFaclCollector,
+    'STD_CALLTAXI': StdCalltaxiCollector,
     'TOUR_BF_API': TourBfCollector,
 }
 
@@ -56,6 +60,7 @@ _UPSERT_DISPATCH = {
     'GG_WELFARE': db_mobility.sync_welfare_facilities,
     'KORAIL_CONV': db_mobility.upsert_station_access,
     'KOWSI_FACL': db_mobility.upsert_facilities,
+    'STD_CALLTAXI': db_mobility.sync_std_calltaxi,
     'TOUR_BF_API': db_mobility.upsert_tour_bf,
 }
 

@@ -24,7 +24,7 @@ TESTS_DIR = os.path.join(ROOT, 'tests')
 # 대상 DB 에 쓰기를 하는 통합 테스트 모듈과, 그 안의 DB 테스트 클래스.
 ITEST_MODULES = {
     'test_db_processing': ('KosisLoadDbTests',),
-    'test_mobility_db': ('UpsertFacilitiesDbTests', 'UpsertEmergencySupportDbTests'),
+    'test_mobility_db': ('UpsertFacilitiesDbTests', 'UpsertEmergencySupportDbTests', 'SyncEmergencySourceDbTests'),
     'test_gg_toilet_db': ('SyncPublicToiletsDbTests',),
     'test_gg_culture_db': ('SyncCultureDbTests',),
     'test_gg_welfare_db': ('WelfareDisRegDbTests',),
