@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -45,6 +46,19 @@ ORG_TABLE = 'poi_dis_support_org'
 def _n(target, *aliases, conv=conv_str, required=True) -> Col:
     """NULL 허용 칸. 변환이 안 되는 값은 NULL 로 덮지 않고 실패시킨다(strict) — 원천 형식이 바뀐 것을 놓치지 않게."""
     return _c(target, *aliases, conv=conv, required=required, null_ok=True, strict=True)
+
+
+# BF 인증 시설 원천(15014781)은 예비인증 행의 '인증만료일' 에 날짜 대신 예비인증 유효기간 규정 문구를 적는다
+# (2026-06-30 판: 예비 13,966행 전부 이 문구, 본인증 8,218행은 날짜). 기한은 인증구분 '예비' 로 알 수 있어
+# 문구는 싣지 않고 NULL 로 둔다. 그 밖의 날짜가 아닌 값은 여전히 실패(원천 형식 변경을 놓치지 않게).
+_BF_PRELIM_EXPIRE = '본인증교부전또는사용승인후1년이내'
+
+
+def conv_bf_expire(value):
+    """BF 인증만료일 — 날짜면 date, 예비인증 유효기간 문구면 None, 그 밖은 ValueError."""
+    if not _blank(value) and re.sub(r'\s+', '', str(value)) == _BF_PRELIM_EXPIRE:
+        return None
+    return conv_date(value)
 
 
 @dataclass(frozen=True)
@@ -241,7 +255,7 @@ DATASETS: Tuple[DisDataset, ...] = (
                    _n('area', '면적'),
                    _n('usage_type', '용도구분'),
                    _n('cert_date', '인증일자', conv=conv_date),
-                   _n('expire_date', '인증만료일', conv=conv_date),
+                   _n('expire_date', '인증만료일', conv=conv_bf_expire),   # 예비인증은 NULL
                    _n('cert_body', '인증기관'),
                )),
     # ---- 지원기관 목록 (poi_dis_support_org) -------------------------------------------

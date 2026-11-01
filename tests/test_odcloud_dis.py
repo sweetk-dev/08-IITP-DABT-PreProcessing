@@ -164,6 +164,19 @@ class BuildRowsTests(unittest.TestCase):
         with self.assertRaises(DatasetError):
             D.build_rows(ds, edition(ds), raw)
 
+    def test_bf_prelim_expire_is_null(self):
+        ds = D.DATASET_BY_KEY['poi_bf_certification']
+        base = {'연번': 1, '인증번호': 'A-1', '인증구분': '본', '인증등급': '우수', '지역코드': '경기', '시군구': '안양시',
+                '지역(시설)명': '시청', '인증대상': '건축물', '신청기관': '안양시', '면적': '1000', '용도구분': '업무시설',
+                '인증일자': '2024-03-01', '인증만료일': '2034-02-28', '인증기관': '한국장애인개발원'}
+        prelim = dict(base, 연번=2, 인증구분='예비', 인증만료일='본인증 교부전 또는 사용승인 후 1년 이내')
+        rows, notes = D.build_rows(ds, edition(ds), [base, prelim])
+        self.assertEqual(rows[0]['expire_date'], datetime.date(2034, 2, 28))
+        self.assertIsNone(rows[1]['expire_date'])
+        self.assertEqual(notes['nulled'], {})
+        with self.assertRaises(DatasetError):
+            D.build_rows(ds, edition(ds), [dict(base, 인증만료일='추후 결정')])
+
     def test_noncompliance_rates(self):
         ds = D.DATASET_BY_KEY['emp_dis_noncompliance_list']
         raw = [{'사업체구분': '민간', '사업체명': '가나', '산업대분류': '제조업', '주소': '서울', '상시근로자수': 300,
