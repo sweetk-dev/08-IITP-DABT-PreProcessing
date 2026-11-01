@@ -1,6 +1,6 @@
 # 장애인 이동편의 공공데이터 멀티소스 수집·전처리 툴
 
-![version](https://img.shields.io/badge/version-v1.22.0-blue)
+![version](https://img.shields.io/badge/version-v1.23.0-blue)
 
 ## 개요
 장애인 이동편의·편의시설 관련 공공데이터를 소스별 수집 어댑터로 수집해, 파일 저장·정제·DB 적재까지 처리하는 Python 기반 툴입니다.
@@ -13,6 +13,8 @@
 - 현행 아키텍처: [docs/design/107-current-architecture.md](docs/design/107-current-architecture.md)
 
 > 이슈 #29 (v1.5.0) — 멀티 외부 API 소스 지원. `--ext-sys` CLI 또는 `EXT_SYS` 환경변수로 수집 대상 소스를 선택. 미지정 시 KOSIS 가 default (후방호환).
+
+> v1.23.0 — **전국 교통약자이동지원센터(장애인콜택시)** 정기 수집기 `STD_CALLTAXI` 추가. 공공데이터포털 표준데이터 OpenAPI 로 센터 목록·접수 전화·운영 시간·차량·요금을 받아 `poi_emergency_support`(`calltaxi`)에 원천 단위로 동기화한다(사라진 센터 논리삭제, 수기 확인 행과 주소가 겹치면 건너뜀). 01 v1.18.0 과 함께 적용한다. 아래 「교통약자이동지원센터 적재」 참고.
 
 > v1.22.0 — 공공데이터포털 **장애인 파일데이터 22종** 정기 수집기 `ODCLOUD_DIS` 추가. 1차년도에 파일로 한 번 받아 두고 DB 에 없던 고용 기록·실적 11종, 시도별 복지 통계 3종, BF 인증 시설, 지원기관 목록 7종을 같은 원천의 최신 판으로 매월 확인해 적재한다. 고용 14종 수집기(`ODCLOUD_EMP`)의 명세·판·칸 검사·값 변환을 그대로 쓰고, 목록형 원천의 종류별 교체와 원천별 고유 칸(`detail` JSON)을 더했다. 01 v1.17.0 과 함께 적용한다. 아래 「장애인 파일데이터 적재」 참고.
 
@@ -426,6 +428,36 @@ python main.py --mode db   --ext-sys ODCLOUD_DIS   # 판이 바뀐 데이터셋�
 ```bash
 # crontab 예시 — 매월 3일 05:00 (고용 14종 04:40 뒤)
 0 5 3 * * cd <PROJECT_DIR> && .venv/bin/python main.py --mode db --ext-sys ODCLOUD_DIS >> logs/cron.log 2>&1
+```
+
+## 교통약자이동지원센터 적재 (표준데이터 `STD_CALLTAXI`, v1.23.0)
+
+공공데이터포털 표준데이터 「전국교통약자이동지원센터정보표준데이터」(15028207)를 OpenAPI 로 받아 `poi_emergency_support` 에
+`support_type='calltaxi'`, `source='STD_CALLTAXI'` 로 적재한다. 활용신청이 필요하고, 키는 같은 포털 키(`sys_ext_api_info` 의
+`STD_CALLTAXI` 행, 없으면 `STD_CALLTAXI_API_KEY`·`DATA_GO_KR_API_KEY`)를 쓴다.
+
+```bash
+python main.py --mode file --ext-sys STD_CALLTAXI   # 수집·변환 결과만 ext_data/STD_CALLTAXI/<날짜>/ 에 저장
+python main.py --mode db   --ext-sys STD_CALLTAXI   # 적재
+```
+
+| 표 칸 | 원천 칸 |
+|---|---|
+| `name` · `addr_road` · `addr_jibun` · `latitude` · `longitude` | 센터명 · 소재지도로명주소 · 소재지지번주소 · 위도 · 경도 |
+| `sido_code` · `sgg_name` | 주소 첫 단어 → 공통코드 `sido_code`(코드에 없는 시도명은 NULL + 경고) · 제공기관명의 시군구(없으면 주소) |
+| `tel` · `homepage` | 접수 전화 · 인터넷 접수 주소(주소 모양일 때만) |
+| `open_hours` | 접수·운행 시각 평일/주말 (`00:00~23:59` 는 24시간, `00:00~00:00` 은 적지 않음) |
+| `note` | 차량 대수(슬로프·리프트·차종) · 사전예약 · 관내/관외 운행 지역 · 요금 · 앱 · 운영기관 · 이용대상 · 이용제한 (1,000자) |
+| `base_dt` | 데이터기준일자 |
+
+- 같은 센터(이름+도로명주소)가 두 번 실리면 데이터기준일자가 늦은 행만 남긴다
+- 동기화: 이 원천이 넣은 행 중 이번에 없는 센터는 논리삭제. 다른 원천(수기 확인 `MANUAL` 등)의 활성 행과 도로명주소가 같은 센터는 넣지 않는다(수기 행 우선)
+- 급감 방어: 논리삭제 예정이 기존의 30%(최소 5곳)를 넘으면 아무것도 바꾸지 않고 중단 → 확인 뒤 `STD_CALLTAXI_ACCEPT_DROP=STD_CALLTAXI` 로 수동 실행
+- 원천 0건·응답 건수 불일치·오류 코드(`resultCode` ≠ 00)는 실패로 끝나고 기존 목록을 유지한다
+
+```bash
+# crontab 예시 — 매월 3일 05:10 (원천 갱신은 수시, 센터 목록이라 월 1회면 충분)
+10 5 3 * * cd <PROJECT_DIR> && .venv/bin/python main.py --mode db --ext-sys STD_CALLTAXI >> logs/cron.log 2>&1
 ```
 
 ## 스케줄러 실행 (정기 수집)

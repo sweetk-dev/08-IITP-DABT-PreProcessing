@@ -131,5 +131,94 @@ class UpsertEmergencySupportDbTests(_DbCase):
         self.assertEqual({g[1] for g in got}, {'031-000-0000'})
 
 
+CT_TABLE = 'itest_poi_emergency_support'
+
+
+def _ct(name, road, source='STD_CALLTAXI', **kw):
+    base = {'support_type': 'calltaxi', 'sido_code': '9440000', 'sgg_name': '시험군', 'name': name,
+            'addr_road': road, 'addr_jibun': None, 'zip_code': None, 'latitude': 36.0, 'longitude': 126.7,
+            'tel': '041-000-0000', 'homepage': None, 'open_hours': None, 'install_desc': None, 'note': None,
+            'source': source, 'confidence': 'H', 'base_dt': '2026-09-01'}
+    base.update(kw)
+    return base
+
+
+@unittest.skipUnless(ITEST_URL, 'ITEST_DB_URL 미설정 — DB 통합 테스트 생략')
+class SyncEmergencySourceDbTests(unittest.TestCase):
+    """원천 단위 동기화(STD_CALLTAXI) — 운영 표 정의를 복제한 임시 표에서 돈다."""
+
+    @classmethod
+    def setUpClass(cls):
+        import db_mobility
+        from sqlalchemy import create_engine, text
+        cls.dm = db_mobility
+        cls.text = staticmethod(text)
+        cls.engine = create_engine(ITEST_URL)
+        cls._orig = (db_mobility.engine, db_mobility.EMERGENCY_TABLE)
+        db_mobility.engine = cls.engine
+        with cls.engine.begin() as conn:
+            conn.execute(text('DROP TABLE IF EXISTS ' + CT_TABLE))
+            conn.execute(text('CREATE TABLE ' + CT_TABLE + ' (LIKE poi_emergency_support INCLUDING DEFAULTS '
+                              'INCLUDING IDENTITY INCLUDING CONSTRAINTS INCLUDING INDEXES)'))
+        db_mobility.EMERGENCY_TABLE = CT_TABLE
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dm.engine, cls.dm.EMERGENCY_TABLE = cls._orig
+        with cls.engine.begin() as conn:
+            conn.execute(cls.text('DROP TABLE IF EXISTS ' + CT_TABLE))
+        cls.engine.dispose()
+
+    def setUp(self):
+        with self.engine.begin() as conn:
+            conn.execute(self.text('TRUNCATE TABLE ' + CT_TABLE))
+        os.environ.pop('STD_CALLTAXI_ACCEPT_DROP', None)
+
+    def _rows(self, where="1=1"):
+        with self.engine.begin() as conn:
+            return conn.execute(self.text(
+                "SELECT name, source, del_yn, tel FROM " + CT_TABLE + " WHERE " + where + " ORDER BY name")).fetchall()
+
+    def test_load_rerun_and_stale_delete(self):
+        rows = [_ct('센터%02d' % i, '충남 b로 %d' % i) for i in range(11)]
+        res = self.dm.sync_std_calltaxi([dict(r) for r in rows])
+        self.assertEqual(res['db_ok'], 11)
+        # 재실행: 값 갱신, 1곳 사라짐 → 논리삭제
+        res = self.dm.sync_std_calltaxi([dict(r, tel='041-111-1111') for r in rows[:-1]])
+        self.assertEqual(res['by_type']['calltaxi']['deleted'], 1)
+        got = self._rows()
+        self.assertEqual(sum(1 for g in got if g[2] == 'N'), 10)
+        self.assertEqual({g[3] for g in got if g[2] == 'N'}, {'041-111-1111'})
+        # 다시 나타나면 되살림
+        self.dm.sync_std_calltaxi([dict(r) for r in rows])
+        self.assertEqual(sum(1 for g in self._rows() if g[2] == 'N'), 11)
+
+    def test_other_source_same_address_is_skipped_and_untouched(self):
+        self.dm.upsert_emergency_support([_ct('안양시 교통약자이동지원센터(수기)', '경기도 안양시 동안구 평촌대로 389',
+                                              source='MANUAL')])
+        res = self.dm.sync_std_calltaxi([_ct('안양시교통약자이동지원센터', '경기도 안양시 동안구  평촌대로 389'),
+                                         _ct('다른센터', '경기도 x로 1')])
+        self.assertEqual(res['by_type']['calltaxi']['skipped_other_source'], 1)
+        got = self._rows()
+        self.assertEqual([(g[0], g[1]) for g in got],
+                         [('다른센터', 'STD_CALLTAXI'), ('안양시 교통약자이동지원센터(수기)', 'MANUAL')])
+        # 다음 실행에서 원천 행이 모두 바뀌어도 수기 행은 지우지 않는다
+        self.dm.sync_std_calltaxi([_ct('다른센터', '경기도 x로 1')])
+        self.assertEqual(self._rows("source='MANUAL'")[0][2], 'N')
+
+    def test_drop_guard(self):
+        rows = [_ct('센터%02d' % i, '충남 c로 %d' % i) for i in range(20)]
+        self.dm.sync_std_calltaxi([dict(r) for r in rows])
+        with self.assertRaisesRegex(RuntimeError, 'STD_CALLTAXI_ACCEPT_DROP=STD_CALLTAXI'):
+            self.dm.sync_std_calltaxi([dict(r) for r in rows[:10]])
+        self.assertEqual(sum(1 for g in self._rows() if g[2] == 'N'), 20)     # 아무것도 바뀌지 않음
+        os.environ['STD_CALLTAXI_ACCEPT_DROP'] = 'STD_CALLTAXI'
+        try:
+            self.dm.sync_std_calltaxi([dict(r) for r in rows[:10]])
+        finally:
+            os.environ.pop('STD_CALLTAXI_ACCEPT_DROP', None)
+        self.assertEqual(sum(1 for g in self._rows() if g[2] == 'N'), 10)
+
+
 if __name__ == '__main__':
     unittest.main()
