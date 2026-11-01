@@ -106,6 +106,11 @@ _ACTION_HINTS = [
      '그대로 적재하면 공개 API 조회가 오류로 끝나므로 적재를 멈췄습니다.'),
     (('err=10', 'err=11'),
      'KOSIS 인증키 문제: 인증키를 재발급해 sys_ext_api_info.auth 를 갱신합니다.'),
+    (('응답 JSON 깨짐', 'Expecting ', 'JSONDecodeError'),
+     '원천 응답 깨짐: 원천 서버가 응답 본문을 중간에 끊거나 깨뜨려 보냈습니다(수집기는 같은 주소를 몇 번 다시 받은 뒤 멈춥니다). '
+     '대개 일시 오류이므로 같은 작업을 `python main.py --mode db --ext-sys <작업>` 으로 다시 실행합니다. 월 1회 작업은 '
+     '다음 정기 실행이 한 달 뒤이니 바로 다시 실행하는 편이 낫습니다. 반복되면 원천 사이트의 응답·공지를 확인합니다. '
+     '그때까지 기존 데이터를 유지합니다.'),
     (('HTTP 5', 'ConnectionError', 'Timeout', 'err=50'),
      '원천 서버·네트워크 오류: 일시 장애일 수 있습니다. 다음 정기 실행 결과를 확인하고, 반복되면 원천 상태를 확인합니다.'),
     (('칸 검사 실패',),
@@ -336,7 +341,10 @@ def compose_mail(kind, ctx):
         lines += ["", "■ 권장 조치"]
         for h in hints:
             lines.append(f"- {h}")
-        lines.append("- 상세 절차: 08-IITP-DABT-PreProcessing 문서 docs/operations/kosis-structure-change-runbook.md")
+        if ext_sys == 'KOSIS':
+            lines.append("- 상세 절차: 08-IITP-DABT-PreProcessing 문서 docs/operations/kosis-structure-change-runbook.md")
+        else:
+            lines.append("- 수집기별 동작·수동 실행: 08-IITP-DABT-PreProcessing README 의 해당 작업 절")
 
     lines += ["", "■ 확인 위치"]
     lines.append("- 정책 운영 콘솔 [운영] 탭 › 데이터 수집" + (f": {console}" if console else ""))
