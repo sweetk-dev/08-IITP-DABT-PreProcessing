@@ -7,14 +7,23 @@ Issue #76 — GBIS / KORAIL_CONV / KOWSI_FACL / TOUR_BF_API.
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 import xml.etree.ElementTree as ET
 from typing import Any, List, Optional
 
-from collectors.base import BaseCollector
+from collectors.base import BaseCollector, _mask_url
+from file_utils import mask_auth_in_text
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PAUSE_SEC = 0.15
+
+# 원천이 200 응답에 중간이 끊기거나 깨진 본문을 실어 보낼 때가 있다(2026-11 경기데이터드림 실측 —
+# 같은 주소를 곧바로 다시 받으면 정상). 본문이 JSON 으로 읽히지 않으면 이 횟수만큼 다시 받는다.
+JSON_REFETCH = 2
+JSON_REFETCH_WAIT_SEC = 2.0
 
 
 def to_int(value) -> Optional[int]:
@@ -85,8 +94,31 @@ class MobilityCollector(BaseCollector):
 
     # --- HTTP 헬퍼 ---------------------------------------------------------
     def get_json(self, url: str) -> dict:
-        resp = self.http_get(url, timeout=30, retries=2, backoff_sec=1.0)
-        return resp.json()
+        """GET → JSON. 본문이 JSON 으로 읽히지 않으면(끊김·깨짐) JSON_REFETCH 번 다시 받는다.
+
+        끝내 읽히지 않으면 '원천 응답 JSON 깨짐' 문구로 RuntimeError — 운영 알림이 이 문구로
+        조치 안내(다시 실행)를 고른다.
+        """
+        attempts = JSON_REFETCH + 1
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, attempts + 1):
+            resp = self.http_get(url, timeout=30, retries=2, backoff_sec=1.0)
+            try:
+                return resp.json()
+            except ValueError as exc:   # requests·json 의 JSONDecodeError 는 ValueError 하위
+                head = (getattr(resp, 'text', '') or '').lstrip()[:120]
+                if not head.startswith(('{', '[')):
+                    # JSON 이 아닌 본문(XML 오류 안내·HTML 등)은 끊긴 응답이 아니다 — 다시 받지 않는다
+                    raise RuntimeError('%s: 원천 응답이 JSON 이 아님 — 앞부분: %s'
+                                       % (self.EXT_SYS or 'MOBILITY', mask_auth_in_text(head))) from exc
+                last_exc = exc
+                logger.warning('%s GET %s 응답 본문이 JSON 으로 읽히지 않음(%d/%d, %d바이트): %s',
+                               self.EXT_SYS or 'MOBILITY', _mask_url(url), attempt, attempts,
+                               len(getattr(resp, 'content', b'') or b''), exc)
+                if attempt < attempts:
+                    time.sleep(JSON_REFETCH_WAIT_SEC)
+        raise RuntimeError('%s: 원천 응답 JSON 깨짐 — %d번 받아도 읽을 수 없음(원천 일시 오류 추정): %s'
+                           % (self.EXT_SYS or 'MOBILITY', attempts, last_exc))
 
     def get_xml(self, url: str) -> ET.Element:
         resp = self.http_get(url, timeout=30, retries=2, backoff_sec=1.0)
