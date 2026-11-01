@@ -1121,9 +1121,9 @@ SUMMARY_REFRESH = {
     'GG_CULTURE': ('poi_culture_sports_facility', None),
     'GG_WELFARE': ('poi_welfare_facility', None),
     'GG_DIS_REG': ('stats_gg_dis_reg_emd', "SELECT max(base_dt) FROM stats_gg_dis_reg_emd"),
-    # 요약표 행이 아직 없다(06·09 노출 전) — 행이 생기면 콜택시 행의 최신 기준일로 갱신된다.
-    'STD_CALLTAXI': ('poi_emergency_support',
-                     "SELECT max(base_dt) FROM poi_emergency_support WHERE support_type = 'calltaxi' AND " + _ACTIVE),
+    # 요약표 행(전동보장구 충전·수리 지원 거점 정보)은 표 전체(충전기·수리센터·콜택시)를 가리킨다 —
+    # 콜택시만 다시 수집해도 원천 기준일은 표 전체의 최신 기준일로 맞춘다.
+    'STD_CALLTAXI': ('poi_emergency_support', "SELECT max(base_dt) FROM poi_emergency_support WHERE " + _ACTIVE),
 }
 
 

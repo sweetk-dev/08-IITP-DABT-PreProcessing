@@ -1,6 +1,6 @@
 # 장애인 이동편의 공공데이터 멀티소스 수집·전처리 툴
 
-![version](https://img.shields.io/badge/version-v1.23.0-blue)
+![version](https://img.shields.io/badge/version-v1.23.1-blue)
 
 ## 개요
 장애인 이동편의·편의시설 관련 공공데이터를 소스별 수집 어댑터로 수집해, 파일 저장·정제·DB 적재까지 처리하는 Python 기반 툴입니다.
@@ -454,6 +454,7 @@ python main.py --mode db   --ext-sys STD_CALLTAXI   # 적재
 - 동기화: 이 원천이 넣은 행 중 이번에 없는 센터는 논리삭제. 다른 원천(수기 확인 `MANUAL` 등)의 활성 행과 도로명주소가 같은 센터는 넣지 않는다(수기 행 우선)
 - 급감 방어: 논리삭제 예정이 기존의 30%(최소 5곳)를 넘으면 아무것도 바꾸지 않고 중단 → 확인 뒤 `STD_CALLTAXI_ACCEPT_DROP=STD_CALLTAXI` 로 수동 실행
 - 원천 0건·응답 건수 불일치·오류 코드(`resultCode` ≠ 00)는 실패로 끝나고 기존 목록을 유지한다
+- 실패 없이 끝나면 공개 데이터 요약표(`poi_emergency_support` 행)의 원천 기준일을 표 전체(충전기·수리센터·콜택시) 활성 행의 최신 기준일로 갱신한다(v1.23.1)
 
 ```bash
 # crontab 예시 — 매월 3일 05:10 (원천 갱신은 수시, 센터 목록이라 월 1회면 충분)
