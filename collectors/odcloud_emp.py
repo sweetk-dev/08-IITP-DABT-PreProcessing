@@ -643,8 +643,8 @@ def resolve_columns(ds: Dataset, fields: Sequence[str]) -> Dict[int, Optional[st
     return out
 
 
-def build_rows(ds: Dataset, edition: Edition, raw_rows: Sequence[dict], max_samples: int = 3
-               ) -> Tuple[List[dict], dict]:
+def build_rows(ds: Dataset, edition: Edition, raw_rows: Sequence[dict], max_samples: int = 3,
+               log_label: str = EXT_SYS) -> Tuple[List[dict], dict]:
     """원천 행 → 표 행. 반환 (rows, notes).
 
     notes = {'nulled': {표 칸: 건수}, 'rounded': {표 칸: 건수}, 'source_columns': {표 칸: 원천 칸}}
@@ -652,6 +652,7 @@ def build_rows(ds: Dataset, edition: Edition, raw_rows: Sequence[dict], max_samp
         rounded — conv_int_round 칸에서 소수를 반올림한 건수.
     NOT NULL 칸의 빈 값·변환 오류(strict 칸은 NULL 허용이어도 변환 오류), unique 위반, 연도 누락은
     DatasetError(오류 예시 max_samples 건 포함).
+    log_label: 경고 로그 앞머리(같은 부품을 쓰는 ODCLOUD_DIS 가 자기 이름을 넘긴다).
     """
     fields = list(edition.fields)
     for r in raw_rows:                    # 명세에 없는 키가 응답에만 나오는 경우까지 검사한다
@@ -725,9 +726,9 @@ def build_rows(ds: Dataset, edition: Edition, raw_rows: Sequence[dict], max_samp
             raise DatasetError('판 안에서 %s 이(가) 겹침 — 예: %s' % ('+'.join(ds.unique), dups))
     for key, n in nulled.items():
         logger.warning('%s:%s %s 칸 변환 불가 %d건을 NULL 로 둠(예: %s)',
-                       EXT_SYS, ds.table, key, n, ', '.join(nulled_samples.get(key, [])))
+                       log_label, ds.table, key, n, ', '.join(nulled_samples.get(key, [])))
     for key, n in rounded.items():
-        logger.warning('%s:%s %s 칸 소수 값 %d건을 반올림해 정수로 둠', EXT_SYS, ds.table, key, n)
+        logger.warning('%s:%s %s 칸 소수 값 %d건을 반올림해 정수로 둠', log_label, ds.table, key, n)
     notes = {
         'nulled': nulled,
         'rounded': rounded,
@@ -812,7 +813,7 @@ class OdcloudEmpCollector(MobilityCollector):
             raise DatasetError('원천 0건 — 기존 데이터를 유지함')
         if len(rows) != total:
             raise DatasetError('받은 행 %d 이 응답 전체 건수 %d 와 다름' % (len(rows), total))
-        logger.info('%s:%s 판 %s(%s) %d행 수집', EXT_SYS, ds.table, edition.uddi[5:13],
+        logger.info('%s:%s 판 %s(%s) %d행 수집', self.EXT_SYS, ds.table, edition.uddi[5:13],
                     edition.base_date_str, len(rows))
         return rows
 

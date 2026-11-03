@@ -14,6 +14,7 @@
 - poi_tour_bf_facility         (TOUR_BF_API)   자연키 없음 → (fclt_name, sido_code) 조회 후 UPDATE/INSERT / 범위 안 사라진 행 논리삭제
 - poi_public_toilet_info       (GG_TOILET)     자연키 없음 → (이름+주소) 매칭 UPDATE / 미매칭 INSERT / 사라진 행 논리삭제
 - poi_emergency_support        (GG_ASSIST_REPAIR) ON CONFLICT (support_type, name, coalesce(addr_road,''))
+- poi_emergency_support        (STD_CALLTAXI)  같은 자연키 + 원천(source)에서 사라진 행 논리삭제, 다른 원천과 주소가 겹치면 건너뜀 (v1.23.0)
 - poi_culture_sports_facility  (GG_CULTURE)    자연키 없음 → 종류별 (이름+주소) 매칭 UPDATE / 되살림 / INSERT / 논리삭제, 종류별 트랜잭션
 - poi_welfare_facility         (GG_WELFARE)    GG_CULTURE 와 같은 방식(장애인복지시설 5종, v1.21.0)
 - stats_gg_dis_reg_emd         (GG_DIS_REG)    (시군, 기준일) 판 단위 교체 — 다른 기준일 판은 남김, 시군별 트랜잭션 (v1.21.0)
@@ -454,19 +455,18 @@ def upsert_tour_bf(rows: List[dict], addr_filter: str = None) -> int:
     return count
 
 
-def upsert_emergency_support(rows: List[dict]) -> int:
-    """poi_emergency_support — (유형, 이름, 도로명주소, 설치지점) 복합 자연키.
+# poi_emergency_support 적재 대상 표 — 통합 테스트가 임시 표로 바꿔 끼운다.
+EMERGENCY_TABLE = 'poi_emergency_support'
 
-    같은 이름의 지회가 시군마다 있어 이름만으로는 구분되지 않는다(예: 경기도지체
-    장애인협회 OO시지회). 주소를 키에 넣어야 시군 간 충돌이 없다.
+# 원천 단위 동기화(sync_emergency_support_source)의 급감 방어: 한 번에 논리삭제될 행이
+# max(EMERGENCY_DROP_MIN_ABS, 그 원천의 기존 활성 행 × EMERGENCY_DROP_MAX_RATIO) 를 넘으면 중단한다.
+EMERGENCY_DROP_MIN_ABS = 5
+EMERGENCY_DROP_MAX_RATIO = 0.3
 
-    install_desc 는 01 v1.7.0 에서 키에 추가됐다. 같은 건물에 충전기가 여러 대
-    설치된 경우(김포시청 제3별관 로비 / 민원동 장애인화장실 옆)를 구분한다.
-    좌표까지 다른 사례가 있어(운정중앙역 환승센터 북측·남측 대합실) 병합하면
-    정보가 사라진다. 수리센터·콜택시는 NULL 이라 종전과 동일하게 동작한다.
-    """
-    sql = (
-        "INSERT INTO poi_emergency_support ("
+
+def _emergency_upsert_sql(table: str) -> str:
+    return (
+        "INSERT INTO " + table + " ("
         " support_type, sido_code, sgg_name, name, addr_road, addr_jibun, zip_code,"
         " latitude, longitude, tel, homepage, open_hours, install_desc, note, source,"
         " confidence, base_dt, created_by)"
@@ -483,10 +483,100 @@ def upsert_emergency_support(rows: List[dict]) -> int:
         " base_dt=EXCLUDED.base_dt, del_yn='N', deleted_at=NULL, deleted_by=NULL,"
         " updated_at=CURRENT_TIMESTAMP, updated_by=:created_by"
     )
+
+
+def upsert_emergency_support(rows: List[dict]) -> int:
+    """poi_emergency_support — (유형, 이름, 도로명주소, 설치지점) 복합 자연키.
+
+    같은 이름의 지회가 시군마다 있어 이름만으로는 구분되지 않는다(예: 경기도지체
+    장애인협회 OO시지회). 주소를 키에 넣어야 시군 간 충돌이 없다.
+
+    install_desc 는 01 v1.7.0 에서 키에 추가됐다. 같은 건물에 충전기가 여러 대
+    설치된 경우(김포시청 제3별관 로비 / 민원동 장애인화장실 옆)를 구분한다.
+    좌표까지 다른 사례가 있어(운정중앙역 환승센터 북측·남측 대합실) 병합하면
+    정보가 사라진다. 수리센터·콜택시는 NULL 이라 종전과 동일하게 동작한다.
+    """
     # install_desc 를 안 넣는 기존 호출부(수리센터·콜택시 로더)도 그대로 돌도록 채운다
     for row in rows:
         row.setdefault('install_desc', None)
-    return _execute_batch(sql, rows)
+    return _execute_batch(_emergency_upsert_sql(EMERGENCY_TABLE), rows)
+
+
+def _emergency_key(name, addr_road, install_desc) -> tuple:
+    return (name, addr_road or '', install_desc or '')
+
+
+def sync_emergency_support_source(rows: List[dict], support_type: str, source: str, accept_env: str) -> dict:
+    """poi_emergency_support 를 한 원천(source) 단위로 동기화한다 — 정기 수집 원천용(v1.23.0).
+
+    - 같은 자연키 행은 갱신(논리삭제돼 있던 행은 되살림), 새 행은 추가.
+    - 이 원천이 넣었던 활성 행 중 이번 수집에 없는 행은 논리삭제한다. 다른 원천(수기 확인·CSV 로더)이
+      넣은 행은 건드리지 않는다.
+    - 같은 유형에서 다른 원천의 활성 행과 도로명주소가 같은 행은 넣지 않는다. 수기로 확인해 넣은 행이
+      더 자세하고(예: 안양시 교통약자이동지원센터), 이름 표기만 다른 같은 센터가 두 줄로 보이는 것을 막는다.
+    - 급감 방어: 논리삭제 예정 행이 허용 수를 넘으면 아무것도 바꾸지 않고 RuntimeError.
+      실제 정리가 맞으면 <accept_env>=<source> 로 수동 실행한다.
+    반환: run_mobility 가 읽는 {'db_ok','db_fail','failures','by_type'}.
+    """
+    import os
+    from sqlalchemy import bindparam
+
+    if not rows:
+        raise RuntimeError('%s: 적재할 행이 없음 — 기존 데이터를 유지함' % source)
+    if engine is None:
+        raise RuntimeError('DB engine not configured (DB_URL)')
+    table = EMERGENCY_TABLE
+    for row in rows:
+        row.setdefault('install_desc', None)
+
+    with engine.begin() as conn:
+        # 같은 원천을 두 실행(정기 + 수동)이 동시에 바꾸지 않게 트랜잭션 잠금을 건다.
+        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {'k': table + ':' + source})
+        existing = conn.execute(text(
+            "SELECT support_id, name, addr_road, install_desc, del_yn, source FROM " + table +
+            " WHERE support_type = :t ORDER BY support_id"), {'t': support_type}).fetchall()
+        own_active = [r for r in existing if r[5] == source and (r[4] or 'N') == 'N']
+        other_addrs = {_norm_addr(r[2]) for r in existing
+                       if r[5] != source and (r[4] or 'N') == 'N' and _norm_addr(r[2])}
+
+        kept, skipped = [], []
+        for row in rows:
+            if _norm_addr(row.get('addr_road')) in other_addrs:
+                skipped.append(row['name'])
+                continue
+            kept.append(row)
+        keys = {_emergency_key(r['name'], r.get('addr_road'), r.get('install_desc')) for r in kept}
+        stale = [r for r in own_active if _emergency_key(r[1], r[2], r[3]) not in keys]
+
+        limit = max(EMERGENCY_DROP_MIN_ABS, int(len(own_active) * EMERGENCY_DROP_MAX_RATIO))
+        accepted = {t.strip().upper() for t in os.getenv(accept_env, '').split(',') if t.strip()}
+        if len(stale) > limit and not ({source, 'ALL'} & accepted):
+            raise RuntimeError('%s(%s): 논리삭제 예정 %d건이 허용 %d건(기존 활성 %d건)을 넘음 — 원천 장애로 보고 '
+                               '적재 중단. 실제 정리가 맞으면 %s=%s 로 수동 실행'
+                               % (table, source, len(stale), limit, len(own_active), accept_env, source))
+        if stale:
+            conn.execute(text(
+                "UPDATE " + table + " SET del_yn='Y', deleted_at=CURRENT_TIMESTAMP, deleted_by=:by,"
+                " updated_at=CURRENT_TIMESTAMP, updated_by=:by WHERE support_id IN :ids"
+            ).bindparams(bindparam('ids', expanding=True)), {'ids': [r[0] for r in stale], 'by': CREATED_BY})
+        conn.execute(text(_emergency_upsert_sql(table)), [dict(r, created_by=CREATED_BY) for r in kept])
+
+    if skipped:
+        logger.info('%s(%s): 다른 원천과 주소가 같아 건너뜀 %d건 — %s', table, source, len(skipped),
+                    ', '.join(skipped[:10]))
+    if stale:
+        logger.info('%s(%s): 원천에서 사라진 %d건 논리삭제 — %s', table, source, len(stale),
+                    ', '.join(r[1] for r in stale[:10]))
+    logger.info('%s(%s): 기존 활성 %d행 → 적재 %d · 건너뜀 %d · 논리삭제 %d',
+                table, source, len(own_active), len(kept), len(skipped), len(stale))
+    return {'db_ok': len(kept), 'db_fail': 0, 'failures': [],
+            'by_type': {support_type: {'loaded': len(kept), 'skipped_other_source': len(skipped),
+                                       'deleted': len(stale)}}}
+
+
+def sync_std_calltaxi(rows: List[dict]) -> dict:
+    """STD_CALLTAXI(교통약자이동지원센터 표준데이터) → poi_emergency_support(calltaxi)."""
+    return sync_emergency_support_source(rows, 'calltaxi', 'STD_CALLTAXI', 'STD_CALLTAXI_ACCEPT_DROP')
 
 
 def touch_latest_sync(ext_sys: str) -> None:
@@ -1031,6 +1121,9 @@ SUMMARY_REFRESH = {
     'GG_CULTURE': ('poi_culture_sports_facility', None),
     'GG_WELFARE': ('poi_welfare_facility', None),
     'GG_DIS_REG': ('stats_gg_dis_reg_emd', "SELECT max(base_dt) FROM stats_gg_dis_reg_emd"),
+    # 요약표 행(전동보장구 충전·수리 지원 거점 정보)은 표 전체(충전기·수리센터·콜택시)를 가리킨다 —
+    # 콜택시만 다시 수집해도 원천 기준일은 표 전체의 최신 기준일로 맞춘다.
+    'STD_CALLTAXI': ('poi_emergency_support', "SELECT max(base_dt) FROM poi_emergency_support WHERE " + _ACTIVE),
 }
 
 

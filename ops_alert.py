@@ -83,6 +83,8 @@ JOB_LABELS = {
     'GG_WELFARE': '경기 장애인복지시설 수집',
     'GG_DIS_REG': '경기 읍면동 등록장애인 수집',
     'ODCLOUD_EMP': '장애인 고용 파일데이터 수집',
+    'ODCLOUD_DIS': '장애인 파일데이터(고용 기록·복지 통계·BF 인증·지원기관) 수집',
+    'STD_CALLTAXI': '교통약자이동지원센터(장애인콜택시) 수집',
 }
 
 _STAGE_LABELS = {'collect': '수집', 'db': '적재', 'batch': '배치'}
@@ -104,6 +106,11 @@ _ACTION_HINTS = [
      '그대로 적재하면 공개 API 조회가 오류로 끝나므로 적재를 멈췄습니다.'),
     (('err=10', 'err=11'),
      'KOSIS 인증키 문제: 인증키를 재발급해 sys_ext_api_info.auth 를 갱신합니다.'),
+    (('응답 JSON 깨짐', 'Expecting ', 'JSONDecodeError'),
+     '원천 응답 깨짐: 원천 서버가 응답 본문을 중간에 끊거나 깨뜨려 보냈습니다(수집기는 같은 주소를 몇 번 다시 받은 뒤 멈춥니다). '
+     '대개 일시 오류이므로 같은 작업을 `python main.py --mode db --ext-sys <작업>` 으로 다시 실행합니다. 월 1회 작업은 '
+     '다음 정기 실행이 한 달 뒤이니 바로 다시 실행하는 편이 낫습니다. 반복되면 원천 사이트의 응답·공지를 확인합니다. '
+     '그때까지 기존 데이터를 유지합니다.'),
     (('HTTP 5', 'ConnectionError', 'Timeout', 'err=50'),
      '원천 서버·네트워크 오류: 일시 장애일 수 있습니다. 다음 정기 실행 결과를 확인하고, 반복되면 원천 상태를 확인합니다.'),
     (('칸 검사 실패',),
@@ -119,6 +126,19 @@ _ACTION_HINTS = [
     (('ODCLOUD_EMP_ACCEPT_DROP',),
      '고용 파일데이터 행 수 급감: 새 판이 비교 대상(직전 판 또는 같은 연도)의 절반 미만입니다. 포털에서 해당 판을 열어 실제로 줄었는지 '
      '확인하고, 맞으면 ODCLOUD_EMP_ACCEPT_DROP=<표이름> 을 붙여 수동 실행합니다.'),
+    (('failed status=401', 'failed status=403'),
+     '공공데이터포털 파일데이터 API 거부: 그 데이터셋의 활용신청이 안 돼 있거나 만료됐을 수 있습니다. 포털 마이페이지의 '
+     '활용신청 목록에서 해당 데이터를 확인·신청하면 다음 실행부터 수집됩니다. 그때까지 해당 표는 기존 데이터를 유지합니다.'),
+    (('ODCLOUD_DIS_ACCEPT_DROP',),
+     '장애인 파일데이터 행 수 급감: 새 판이 비교 대상(직전 판·같은 연도·기존 목록)의 절반 미만입니다. 포털에서 해당 판을 열어 실제로 '
+     '줄었는지 확인하고, 맞으면 ODCLOUD_DIS_ACCEPT_DROP=<키> 를 붙여 수동 실행합니다.'),
+    (('STD_CALLTAXI_ACCEPT_DROP',),
+     '교통약자이동지원센터 목록 급감: 원천에서 사라진 센터가 기존의 30%(최소 5곳)를 넘었습니다. 공공데이터포털 '
+     '「전국교통약자이동지원센터정보표준데이터」에서 실제로 줄었는지 확인하고, 맞으면 STD_CALLTAXI_ACCEPT_DROP=STD_CALLTAXI 를 '
+     '붙여 수동 실행합니다. 그때까지 기존 목록을 유지합니다.'),
+    (('STD_CALLTAXI 응답 오류',),
+     '표준데이터 API 오류 응답: resultCode 30·20 은 인증키 미등록·활용신청 문제, 22 는 일일 호출 한도 초과입니다. 포털 '
+     '마이페이지에서 「전국교통약자이동지원센터정보표준데이터」 활용신청 상태를 확인합니다. 그때까지 기존 목록을 유지합니다.'),
     (('GG_CULTURE_ACCEPT_DROP', 'GG_WELFARE_ACCEPT_DROP'),
      '경기 시설 목록 급감: 한 종류에서 지워질 시설이 기존의 30%(최소 3곳)를 넘었습니다. 경기데이터드림에서 해당 목록을 열어 '
      '실제로 줄었는지 확인하고, 맞으면 메일에 적힌 환경변수(<작업>_ACCEPT_DROP=<종류>)를 붙여 수동 실행합니다. '
@@ -321,7 +341,10 @@ def compose_mail(kind, ctx):
         lines += ["", "■ 권장 조치"]
         for h in hints:
             lines.append(f"- {h}")
-        lines.append("- 상세 절차: 08-IITP-DABT-PreProcessing 문서 docs/operations/kosis-structure-change-runbook.md")
+        if ext_sys == 'KOSIS':
+            lines.append("- 상세 절차: 08-IITP-DABT-PreProcessing 문서 docs/operations/kosis-structure-change-runbook.md")
+        else:
+            lines.append("- 수집기별 동작·수동 실행: 08-IITP-DABT-PreProcessing README 의 해당 작업 절")
 
     lines += ["", "■ 확인 위치"]
     lines.append("- 정책 운영 콘솔 [운영] 탭 › 데이터 수집" + (f": {console}" if console else ""))

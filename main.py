@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # preserved: with ext_sys defaulting to 'KOSIS', the legacy save path and the
 # collector behavior are identical to v1.4.0.
 # ============================================================================
-__version__ = "1.21.0"
+__version__ = "1.23.2"
 
 
 
@@ -50,6 +50,8 @@ DEFAULT_EXT_SYS = 'KOSIS'
 # 요약 모양이 이동편의 흐름과 같아 같은 갈래에서 처리한다. 모듈은 이 작업을 실행할 때만 불러온다 —
 # 새 모듈에 문제가 있어도 KOSIS·이동편의 등 다른 정기 작업의 시작(import)에는 영향이 없게 하기 위해서다.
 ODCLOUD_EMP_EXT_SYS = 'ODCLOUD_EMP'
+# v1.22.0: 장애인 파일데이터 22종(odcloud) — 고용 수집기와 같은 부품·같은 요약 모양(odcloud_dis_pipeline).
+ODCLOUD_DIS_EXT_SYS = 'ODCLOUD_DIS'
 
 # DATA_COLLECTION_SCOPE 허용값. 그 외 값은 실행 중단(조용한 ALL 폴백 제거).
 ALLOWED_DATA_COLLECTION_SCOPES = ('ALL', 'PARTIAL')
@@ -426,11 +428,15 @@ def main():
 
         # 이슈 #76: 이동편의 소스는 통계(stats_*) 흐름과 별개 파이프라인으로 위임
         # v1.19.0: 고용 파일데이터(ODCLOUD_EMP)도 같은 요약 모양으로 돌려주므로 같은 갈래에서 처리한다.
-        if ext_sys in MOBILITY_EXT_SYS or ext_sys == ODCLOUD_EMP_EXT_SYS:
+        if ext_sys in MOBILITY_EXT_SYS or ext_sys in (ODCLOUD_EMP_EXT_SYS, ODCLOUD_DIS_EXT_SYS):
             if ext_sys == ODCLOUD_EMP_EXT_SYS:
                 from odcloud_emp_pipeline import run_odcloud_emp
                 mob = run_odcloud_emp(args.mode)
                 # 일부 표만 돌린 수동 실행(ODCLOUD_EMP_ONLY)은 KOSIS 의 PARTIAL 과 같이 알림 대상이 아니다.
+                run_scope = mob.get('run_scope') or 'ALL'
+            elif ext_sys == ODCLOUD_DIS_EXT_SYS:
+                from odcloud_dis_pipeline import run_odcloud_dis
+                mob = run_odcloud_dis(args.mode)
                 run_scope = mob.get('run_scope') or 'ALL'
             else:
                 mob = run_mobility(ext_sys, args.mode)

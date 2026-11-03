@@ -176,10 +176,12 @@ def validate_rows(table_name: str, rows: List[dict], colinfo: Dict[str, dict], m
         raise ValueError('%s 표 정의와 맞지 않음: %s' % (table_name, ' / '.join(problems)))
 
 
-def check_drop(table_name: str, new_count: int, replaced_count: int, accept: set, scope: str = '') -> None:
+def check_drop(table_name: str, new_count: int, replaced_count: int, accept: set, scope: str = '',
+               env_name: str = 'ODCLOUD_EMP_ACCEPT_DROP') -> None:
     """급감 방어. 새 행이 바꿔치울 행의 DROP_MIN_RATIO 미만이면 ValueError.
 
     scope: 메시지에 붙일 범위 설명(연도별 검사의 '2024년' 등). 비우면 표 전체.
+    env_name: 허용 환경변수 이름(메시지용). 같은 규칙을 쓰는 ODCLOUD_DIS 는 자기 변수 이름을 넘긴다.
     """
     if replaced_count <= 0:
         return
@@ -187,12 +189,12 @@ def check_drop(table_name: str, new_count: int, replaced_count: int, accept: set
         return
     where = '%s(%s)' % (table_name, scope) if scope else table_name
     if 'ALL' in accept or table_name in accept:
-        logger.warning('%s: 행 수 급감(%d → %d)이지만 ODCLOUD_EMP_ACCEPT_DROP 로 허용', where,
-                       replaced_count, new_count)
+        logger.warning('%s: 행 수 급감(%d → %d)이지만 %s 로 허용', where,
+                       replaced_count, new_count, env_name)
         return
     raise ValueError('%s: 새 판 %d행이 비교 대상 기존 %d행의 %d%% 미만 — 원천 장애로 보고 적재 중단. '
-                     '실제로 줄어든 것이 맞으면 ODCLOUD_EMP_ACCEPT_DROP=%s 로 수동 실행'
-                     % (where, new_count, replaced_count, int(DROP_MIN_RATIO * 100), table_name))
+                     '실제로 줄어든 것이 맞으면 %s=%s 로 수동 실행'
+                     % (where, new_count, replaced_count, int(DROP_MIN_RATIO * 100), env_name, table_name))
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +208,8 @@ def _existing_by_year(conn, phys: str, years: List[int]) -> Dict[int, int]:
 
 
 def check_drop_plan(table_name: str, mode: str, rows: List[dict], old_total: int,
-                    old_by_year: Dict[int, int], accept: set) -> None:
+                    old_by_year: Dict[int, int], accept: set,
+                    env_name: str = 'ODCLOUD_EMP_ACCEPT_DROP') -> None:
     """급감 방어 판정(DB 없이 계산 — 드라이런·단위 테스트에서도 쓴다). 걸리면 ValueError.
 
     MODE_YEAR 는 합계뿐 아니라 연도마다 따로 본다 — 누적 판에서 한 해가 통째로 빠지거나 크게 줄어도
@@ -219,8 +222,8 @@ def check_drop_plan(table_name: str, mode: str, rows: List[dict], old_total: int
         for r in rows:
             new[r['year']] = new.get(r['year'], 0) + 1
         for y in sorted(new):
-            check_drop(table_name, new[y], old_by_year.get(y, 0), accept, scope='%d년' % y)
-    check_drop(table_name, len(rows), old_total, accept)
+            check_drop(table_name, new[y], old_by_year.get(y, 0), accept, scope='%d년' % y, env_name=env_name)
+    check_drop(table_name, len(rows), old_total, accept, env_name=env_name)
 
 
 def edition_baseline(conn, phys: str, base_date: datetime.date) -> tuple:
@@ -244,7 +247,7 @@ def edition_baseline(conn, phys: str, base_date: datetime.date) -> tuple:
 
 
 def _guard(conn, table_name: str, mode: str, rows: List[dict], years: List[int], accept: set,
-           base_date: datetime.date) -> dict:
+           base_date: datetime.date, env_name: str = 'ODCLOUD_EMP_ACCEPT_DROP') -> dict:
     """지울 행 수와 급감 방어 비교 대상을 세고 check_drop_plan 으로 판정한다(걸리면 ValueError).
 
     반환: {'replace': 이번에 지울 기존 행 수, 'baseline': 비교 행 수, 'baseline_dt': 비교 판 기준일}
@@ -253,11 +256,11 @@ def _guard(conn, table_name: str, mode: str, rows: List[dict], years: List[int],
     if mode == 'year':
         old = _existing_by_year(conn, phys, years)
         info = {'replace': sum(old.values()), 'baseline': sum(old.values()), 'baseline_dt': None}
-        check_drop_plan(table_name, mode, rows, info['baseline'], old, accept)
+        check_drop_plan(table_name, mode, rows, info['baseline'], old, accept, env_name=env_name)
         return info
     baseline, baseline_dt, same = edition_baseline(conn, phys, base_date)
     info = {'replace': same, 'baseline': baseline, 'baseline_dt': baseline_dt}
-    check_drop_plan(table_name, mode, rows, baseline, {}, accept)
+    check_drop_plan(table_name, mode, rows, baseline, {}, accept, env_name=env_name)
     return info
 
 
