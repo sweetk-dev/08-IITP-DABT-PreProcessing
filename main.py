@@ -396,6 +396,8 @@ def write_run_summary(summary):
         f"| files_ok={summary.get('files_ok')} | db_ok={summary.get('db_ok')} db_fail={summary.get('db_fail')} "
         f"| dur={summary.get('duration_sec')}s | status={summary.get('status')}"
     )
+    if summary.get('coord'):
+        line += f" | coord={summary.get('coord')}"
     if summary.get('error'):
         line += f" | error={summary.get('error')}"
     with open(path, 'a', encoding='utf-8') as f:
@@ -444,6 +446,10 @@ def main():
             summary['files_ok'] = mob['files_ok']
             summary['db_ok'] = mob['db_ok']
             summary['db_fail'] = mob['db_fail']
+            cg = mob.get('coord_guard')
+            if cg and (cg['swapped'] or cg['geocoded'] or cg['nulled']):
+                # v1.25.0: 적재 전 좌표 보정 건수 — 실행 기록에 남겨 원천 좌표 품질을 추적한다
+                summary['coord'] = 'swap{swapped}/geo{geocoded}/null{nulled}/ok{ok}'.format(**cg)
             summary['status'] = 'SUCCESS'
             exit_code = 0
             if mob.get('failures'):

@@ -304,7 +304,11 @@ def upsert_facilities(rows: List[dict]) -> int:
         " :approach_road_yn, :guide_facility_yn, :accessible_room_yn, :eval_info_raw, CAST(:base_dt AS date), :created_by)"
         " ON CONFLICT (facl_inf_id) DO UPDATE SET"
         " wfclt_id=EXCLUDED.wfclt_id, facl_name=EXCLUDED.facl_name, facl_type=EXCLUDED.facl_type,"
-        " addr=EXCLUDED.addr, latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude,"
+        " addr=EXCLUDED.addr,"
+        # 좌표도 "새 값이 NULL 이면 기존 값 유지"(v1.25.0). 원천이 0,0 처럼 쓸 수 없는 좌표를 보내
+        # coord_guard 가 비운 경우, 이전에 확인·보정해 둔 좌표를 지우지 않는다.
+        " latitude=COALESCE(EXCLUDED.latitude, poi_facility_accessibility.latitude),"
+        " longitude=COALESCE(EXCLUDED.longitude, poi_facility_accessibility.longitude),"
         " estb_date=EXCLUDED.estb_date,"
         # 기구표에서 나오는 플래그 8종과 원문은 "새 값이 NULL 이면 기존 값 유지"로 갱신한다.
         #   새 값이 NULL 이 되는 경우: (1) 기구표 조회를 끈 실행(KOWSI_FETCH_EVAL=OFF — 전 플래그 None)
