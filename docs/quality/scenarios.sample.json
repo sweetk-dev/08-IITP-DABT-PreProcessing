@@ -1,0 +1,26 @@
+[
+  {
+    "name": "정상 실행 대조(오류 없음)",
+    "ext_sys": "GG_TOILET",
+    "command": ["python", "main.py", "--mode", "db", "--ext-sys", "GG_TOILET"],
+    "expect": {"status_in": ["SUCCESS"], "alert": null}
+  },
+  {
+    "name": "원천 주소 접속 불가",
+    "ext_sys": "GG_TOILET",
+    "save_sql": {"saved_url": "SELECT ext_url FROM sys_ext_api_info WHERE ext_sys = 'GG_TOILET'"},
+    "setup_sql": ["UPDATE sys_ext_api_info SET ext_url = 'https://invalid.invalid/api' WHERE ext_sys = 'GG_TOILET'"],
+    "restore_sql": ["UPDATE sys_ext_api_info SET ext_url = :saved_url WHERE ext_sys = 'GG_TOILET'"],
+    "command": ["python", "main.py", "--mode", "db", "--ext-sys", "GG_TOILET"],
+    "expect": {"status_in": ["ERROR", "PARTIAL"], "hint_any": ["ConnectionError", "Timeout", "HTTP 5"], "alert": "FAIL"}
+  },
+  {
+    "name": "KOSIS 인증키 오류",
+    "ext_sys": "KOSIS",
+    "save_sql": {"saved_auth": "SELECT auth FROM sys_ext_api_info WHERE ext_sys = 'KOSIS'"},
+    "setup_sql": ["UPDATE sys_ext_api_info SET auth = 'INVALID_KEY_FOR_TEST' WHERE ext_sys = 'KOSIS'"],
+    "restore_sql": ["UPDATE sys_ext_api_info SET auth = :saved_auth WHERE ext_sys = 'KOSIS'"],
+    "command": ["python", "main.py", "--mode", "db", "--ext-sys", "KOSIS"],
+    "expect": {"status_in": ["ERROR", "PARTIAL"], "hint_any": ["err=10", "err=11"], "alert": "FAIL"}
+  }
+]
