@@ -78,7 +78,26 @@ class GuardRowsTests(unittest.TestCase):
             self.assertIsNone(coord_guard.guard([{'latitude': 0, 'longitude': 0}], 'T'))
 
     def test_no_key_no_geocoder(self):
-        with mock.patch.dict(os.environ, {'KAKAO_REST_API_KEY': ''}):
+        with mock.patch.dict(os.environ, {'KAKAO_REST_API_KEY': '', 'KAKAO_KEY_FILE': ''}):
+            self.assertIsNone(coord_guard.geocoder_from_env())
+
+    def test_key_read_from_shared_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 'shared.env')
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write('OTHER=1\nKAKAO_REST_API_KEY=abc123\n')
+            with mock.patch.dict(os.environ, {'KAKAO_REST_API_KEY': '', 'KAKAO_KEY_FILE': p}):
+                g = coord_guard.geocoder_from_env()
+            self.assertIsNotNone(g)
+            self.assertEqual(g._key, 'abc123')
+
+    def test_env_key_wins_over_file(self):
+        with mock.patch.dict(os.environ, {'KAKAO_REST_API_KEY': 'envkey', 'KAKAO_KEY_FILE': '/nonexistent'}):
+            self.assertEqual(coord_guard.geocoder_from_env()._key, 'envkey')
+
+    def test_missing_key_file_no_geocoder(self):
+        with mock.patch.dict(os.environ, {'KAKAO_REST_API_KEY': '', 'KAKAO_KEY_FILE': '/nonexistent/x.env'}):
             self.assertIsNone(coord_guard.geocoder_from_env())
 
 

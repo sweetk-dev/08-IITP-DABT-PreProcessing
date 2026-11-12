@@ -5,7 +5,7 @@
     1. 위도·경도가 국내 범위(위도 33~39, 경도 124~132) 안이면 그대로 둔다.
     2. 0,0 이나 한쪽만 있는 값은 쓸 수 없는 좌표로 보고 아래 3~5 를 거친다(둘 다 비어 있으면 그대로 둔다).
     3. 위도·경도를 맞바꾸면 범위 안에 들어오면 맞바꾼다.
-    4. 그래도 범위 밖이면 행의 주소로 좌표를 다시 찾는다(카카오 로컬 주소 검색, KAKAO_REST_API_KEY 가 있을 때).
+    4. 그래도 범위 밖이면 행의 주소로 좌표를 다시 찾는다(카카오 로컬 주소 검색, KAKAO_REST_API_KEY 또는 KAKAO_KEY_FILE 이 있을 때).
     5. 찾지 못하면 위도·경도를 비운다(NULL) — 틀린 위치를 지도·경로 안내에 내보내지 않기 위해서다.
 
 원천이 준 값은 ext_data/<EXT_SYS>/<날짜>/rows.json 에 그대로 남는다. 보정 건수는 실행 요약(coord_guard)에 남긴다.
@@ -158,8 +158,26 @@ def enabled() -> bool:
     return raw is None or str(raw).strip().lower() not in ('0', 'false', 'no', 'off')
 
 
+def _key_from_file(path: str) -> str:
+    """키를 다른 서비스와 함께 쓰는 설정 파일에서 KAKAO_REST_API_KEY 한 줄만 읽는다.
+
+    키 값을 이 레포 .env 로 옮겨 적지 않고 한 곳에서만 관리하기 위한 것이다.
+    값은 로그에 남기지 않는다.
+    """
+    try:
+        from dotenv import dotenv_values
+        return (dotenv_values(path).get('KAKAO_REST_API_KEY') or '').strip()
+    except Exception as ex:  # 파일이 없거나 읽을 수 없으면 주소 재검색만 끈다
+        logger.warning('KAKAO_KEY_FILE 을 읽지 못함 (%s): %s', path, type(ex).__name__)
+        return ''
+
+
 def geocoder_from_env() -> Optional[KakaoGeocoder]:
     key = (os.getenv('KAKAO_REST_API_KEY') or '').strip()
+    if not key:
+        path = (os.getenv('KAKAO_KEY_FILE') or '').strip()
+        if path:
+            key = _key_from_file(os.path.expanduser(path))
     return KakaoGeocoder(key) if key else None
 
 
