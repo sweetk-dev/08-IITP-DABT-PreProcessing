@@ -12,6 +12,8 @@ GBIS_LOWFLOOR 는 저상버스 노선현황 페이지(전일 기준)를 읽어 t
 갱신한다(v1.21.0, db_mobility.SUMMARY_REFRESH).
 STD_CALLTAXI 는 전국 교통약자이동지원센터 표준데이터를 poi_emergency_support(calltaxi)에 원천 단위로
 동기화한다(v1.23.0).
+DB 에 넣기 전에 좌표를 본다(v1.25.0, coord_guard) — 국내 범위 밖이면 맞바꾸기·주소 재검색으로 고치고,
+안 되면 비운다. 원천 값은 ext_data 의 rows.json 에 그대로 남는다.
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ import datetime
 import logging
 import os
 
+import coord_guard
 import db_mobility
 from db import get_api_info
 from collectors.gbis import GbisCollector
@@ -95,10 +98,18 @@ def _collect_gbis_stations(collector, route_rows, save_dir, mode: str, summary: 
     summary['route_stations'] = len(links)
 
     if mode == 'db':
+        _apply_coord_guard(stations, 'GBIS 정류장', summary, 'coord_guard_stations')
         summary['stations_db_ok'] = db_mobility.upsert_bus_stations(stations)
         summary['route_stations_db_ok'] = db_mobility.upsert_bus_route_stations(links)
         logger.info('GBIS 경유정류소 DB 적재 완료: 정류장 %d행 / 노선-정류장 %d행',
                     summary['stations_db_ok'], summary['route_stations_db_ok'])
+
+
+def _apply_coord_guard(rows, label: str, summary: dict, key: str = 'coord_guard') -> None:
+    """적재 직전 좌표 보정(coord_guard). 좌표가 있는 행이 하나도 없는 소스는 요약에 남기지 않는다."""
+    stats = coord_guard.guard(rows, label)
+    if stats and (stats['ok'] + stats['swapped'] + stats['geocoded'] + stats['nulled']):
+        summary[key] = stats
 
 
 def run_mobility(ext_sys: str, mode: str) -> dict:
@@ -125,6 +136,7 @@ def run_mobility(ext_sys: str, mode: str) -> dict:
     # 실행 요약의 failures 로 옮겨 main.py 가 부분 완료(PARTIAL)·실패 목록으로 기록·알림한다.
     summary['failures'] = list(getattr(collector, 'failures', None) or [])
     if mode == 'db':
+        _apply_coord_guard(rows, ext_sys, summary)
         upsert = _UPSERT_DISPATCH[ext_sys]
         result = upsert(rows)
         if isinstance(result, dict):

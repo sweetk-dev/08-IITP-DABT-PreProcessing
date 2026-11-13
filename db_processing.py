@@ -112,6 +112,12 @@ _OBJ_ID_RE = re.compile(r'^[A-Za-z0-9_]{1,40}$')
 _SAFE_IDENT = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 
 
+# 통합 테이블 dt 의 숫자 판정(PostgreSQL 정규식) — 앞뒤 공백 허용, 부호·소수 허용, 지수 표기는 받지 않는다.
+# KOSIS DT 는 "616", "12.5", "-3.2" 같은 평문 숫자로 온다. 이 식에 맞지 않는 값(예: '-', 'x', '…', '')은
+# 숫자가 아닌 원천 표기로 보고 dt_symbol 에 둔다(_transfer_to_integration_table).
+_DT_NUMERIC_RE = r'^\s*[-+]?([0-9]+(\.[0-9]*)?|\.[0-9]+)\s*$'
+
+
 def _require_safe_table(name, stat_tbl_id=''):
     if not name or not _SAFE_IDENT.match(str(name)):
         raise KosisDataValidationError(f"[{stat_tbl_id}] 통합 테이블 이름 형식 오류: {name!r}")
@@ -860,10 +866,16 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
           AND prd_de ~ '^[0-9]+$'   -- 빈/비숫자 period 행 제외(CAST 실패 방지)
         """
     else:
-        # dt는 숫자로 변환, '-' 또는 ''일 경우 0으로 변환
+        # 숫자형 dt 통합 테이블 — 원천 수치가 숫자면 dt 에, 숫자가 아니면(예: '-') 원래 표기를 dt_symbol 에 둔다.
+        #   - v1.25.x 까지는 '-'·빈 값을 0 으로 바꿔 넣었다. 그러면 "0%" 와 "해당 없음(그 해 조사에 없던
+        #     응답 항목, 응답자가 없는 칸 등)" 이 구분되지 않고, 평균 점수 표에서는 '-' 가 0점이 된다.
+        #   - 또 '-'·빈 값 외의 기호(x·… 등)가 오면 CAST 가 실패해 그 통계 적재 전체가 실패했다.
+        #   - 01 v1.19.0 의 CHECK(ck_<테이블>_dt_value) 가 "dt 와 dt_symbol 중 정확히 하나" 를 보장한다.
+        #     원천 dt 가 NULL·빈 값이면 dt_symbol = '' (빈 값이었다는 표시)로 둬 그 조건을 지킨다.
+        #   - 숫자 판정 정규식은 _DT_NUMERIC_RE 하나만 쓴다(양쪽 CASE 가 어긋나면 CHECK 위반).
         insert_sql = f"""
         INSERT INTO {intg_tbl_id} (
-            src_data_id, prd_de, c1, c2, c3, itm_id, unit_nm, dt, lst_chn_de, src_latest_chn_dt, created_by
+            src_data_id, prd_de, c1, c2, c3, itm_id, unit_nm, dt, dt_symbol, lst_chn_de, src_latest_chn_dt, created_by
         )
         SELECT 
             src_data_id,
@@ -871,7 +883,8 @@ def _transfer_to_integration_table(session, file_info, stats_src, stats_data_inf
             {exprs['c1']}, {exprs['c2']}, {exprs['c3']},
             {exprs['itm_id']},
             unit_nm,
-            CASE WHEN dt = '-' OR dt = '' THEN 0 ELSE CAST(dt AS NUMERIC(15,3)) END,
+            CASE WHEN dt ~ '{_DT_NUMERIC_RE}' THEN CAST(btrim(dt) AS NUMERIC(15,3)) END,
+            CASE WHEN dt ~ '{_DT_NUMERIC_RE}' THEN NULL ELSE left(COALESCE(btrim(dt), ''), 10) END,
             NULLIF(lst_chn_de, '')::date,
             :stat_latest_chn_dt,
             'SYS-BATCH'

@@ -1,0 +1,11 @@
+{
+  "groups": [
+    {"name": "기초 비정형", "path": "data/unstructured/basic", "auto": true},
+    {"name": "고용 비정형", "path": "data/unstructured/employment", "auto": false},
+    {"name": "이동권 비정형", "path": "data/unstructured/mobility", "auto": true}
+  ],
+  "low": 3,
+  "high": 30,
+  "dedup": true,
+  "ignore": ["Thumbs.db", ".DS_Store", "desktop.ini"]
+}
