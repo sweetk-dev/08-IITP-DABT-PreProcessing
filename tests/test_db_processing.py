@@ -715,6 +715,31 @@ class KosisLoadDbTests(unittest.TestCase):
                 {'s': self.src_data_id['ITEST_DT_C']}).scalars().all()
         self.assertEqual(values, ['-'])
 
+    # --- (v1.26.0) 숫자형 dt 테이블의 원천 기호 보존 -----------------------------
+    def test_numeric_dt_table_keeps_source_symbol_instead_of_zero(self):
+        """숫자가 아닌 원천 수치는 0 이 아니라 dt=NULL + dt_symbol=원래 표기로 들어간다.
+
+        01 v1.19.0 의 dt_symbol 칸·CHECK(dt 와 dt_symbol 중 정확히 하나)가 적용된 DB 가 필요하다.
+        전용 사본 테이블(INTG_A)은 stats_dis_reg_natl_by_new 를 LIKE 로 복사하므로 칸 정의를 그대로 받는다.
+        """
+        rows = _rows('ITEST_DT_A')                     # 3년 × 2분류 = 6행
+        raw = ['10', '-', '', ' 3.5 ', 'x', '\u2026']   # 숫자 · 대시 · 빈 값 · 공백 낀 숫자 · 비밀보호 · 말줄임
+        for r, v in zip(rows, raw):
+            r['DT'] = v
+        for _ in range(2):                              # 재실행해도 같은 결과(통계별 전량 교체)
+            result = self._run({'ITEST_DT_A': rows})
+            self.assertEqual(result['failed'], [])
+        with self.engine.begin() as conn:
+            got = conn.execute(self.text(
+                "SELECT prd_de, c1, dt, dt_symbol FROM " + INTG_A +
+                " WHERE src_data_id = :s ORDER BY prd_de, c1"),
+                {'s': self.src_data_id['ITEST_DT_A']}).fetchall()
+        self.assertEqual(len(got), len(rows))
+        pairs = [(None if d is None else float(d), sym) for _, _, d, sym in got]
+        self.assertEqual(pairs, [(10.0, None), (None, '-'), (None, ''), (3.5, None), (None, 'x'), (None, '\u2026')])
+        # 0 으로 바뀐 행이 없어야 한다
+        self.assertNotIn(0.0, [d for d, _ in pairs])
+
     # --- 통합 테이블에 UNIQUE 인덱스가 있는 경우 -----------------------------
     def test_rerun_works_with_unique_index_on_integration_table(self):
         """01 의 통합 테이블 UNIQUE 인덱스(자연키)와 같은 정의를 건 상태에서도 재실행이 된다."""
