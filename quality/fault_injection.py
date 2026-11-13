@@ -76,7 +76,11 @@ def run_scenarios(db_url: str, scenarios: List[dict], workdir: str, protect=("ii
                 saved[k] = c.execute(text(q)).scalar()
             prev = c.execute(text("SELECT status FROM sys_batch_run_log WHERE ext_sys = :e ORDER BY started_at DESC LIMIT 1"),
                              {"e": ext}).scalar()
-            t0 = c.execute(text("SELECT now()")).scalar()
+            # 이번 시나리오의 실행 기록은 "시험 직전 마지막 run_id 보다 큰 기록" 으로 찾는다.
+            # 시각으로 찾지 않는 이유: 수집 명령은 started_at 을 초 단위로 잘라 기록한다(main.py 의 strftime).
+            # DB 의 now() 는 소수점 이하까지 있으므로, 같은 초 안에 시작한 실행은 started_at < now() 가 되어
+            # "실행 기록이 남지 않음" 으로 잘못 판정된다(시나리오를 연달아 돌리면 대부분 이 경우다).
+            last_id = c.execute(text("SELECT COALESCE(max(run_id), 0) FROM sys_batch_run_log")).scalar()
             for q in sc.get("setup_sql") or []:
                 c.execute(text(q), saved)
         env = dict(os.environ, DB_URL=db_url, **{k: str(v) for k, v in (sc.get("env") or {}).items()})
@@ -94,8 +98,8 @@ def run_scenarios(db_url: str, scenarios: List[dict], workdir: str, protect=("ii
         with eng.connect() as c:
             row = c.execute(text("""
                 SELECT run_mode, run_scope, status, failures::text AS failures, error_summary, alert_status
-                  FROM sys_batch_run_log WHERE ext_sys = :e AND started_at >= :t ORDER BY started_at DESC LIMIT 1"""),
-                {"e": ext, "t": t0}).mappings().first()
+                  FROM sys_batch_run_log WHERE ext_sys = :e AND run_id > :last ORDER BY run_id DESC LIMIT 1"""),
+                {"e": ext, "last": last_id}).mappings().first()
         exp = sc.get("expect") or {}
         reasons = []
         if row is None:

@@ -127,3 +127,32 @@ def test_fault_injection_alert_rule_matches_ops_alert():
     assert fault_injection._decide_alert("db", "ALL", "ERROR", "SUCCESS") == "FAIL"
     assert fault_injection._decide_alert("db", "ALL", "SUCCESS", "ERROR") == "RECOVER"
     assert fault_injection._decide_alert("file", "ALL", "ERROR", None) is None
+
+
+@pytest.mark.skipif(not os.getenv("ITEST_DB_URL"), reason="ITEST_DB_URL 미설정 — DB 통합 테스트 생략")
+def test_fault_injection_finds_run_started_in_same_second():
+    """수집 명령은 started_at 을 초 단위로 잘라 기록한다. 시험 시작과 같은 초에 기록된 실행도 찾아야 한다.
+
+    명령 대신 실행 기록 1행을 직접 넣는 작은 스크립트를 돌린다(started_at = 이번 초의 시작).
+    검증용 DB(ITEST_DB_URL)에서만 돌고, 표식 ext_sys 의 행은 끝나면 지운다.
+    """
+    from sqlalchemy import create_engine, text
+    url = os.environ["ITEST_DB_URL"]
+    ext = "ITEST_FAULT_SAME_SEC"
+    code = ("import os, sqlalchemy as sa\n"
+            "e = sa.create_engine(os.environ['DB_URL'])\n"
+            "with e.begin() as c:\n"
+            "    c.execute(sa.text(\"INSERT INTO sys_batch_run_log (ext_sys, run_mode, run_scope, started_at, finished_at,"
+            " exit_code, status, targets, ok_cnt, fail_cnt, failures) VALUES ('" + ext + "', 'db', 'ALL',"
+            " date_trunc('second', now()), now(), 0, 'SUCCESS', 1, 1, 0, '[]'::jsonb)\"))\n")
+    sc = [{"name": "same-second", "ext_sys": ext, "command": [sys.executable, "-c", code],
+           "expect": {"status_in": ["SUCCESS"]}}]
+    eng = create_engine(url)
+    try:
+        res = fault_injection.run_scenarios(url, sc, ".")
+        assert res[0].ok, res[0].reasons
+        assert res[0].status == "SUCCESS"
+    finally:
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM sys_batch_run_log WHERE ext_sys = :e"), {"e": ext})
+        eng.dispose()
