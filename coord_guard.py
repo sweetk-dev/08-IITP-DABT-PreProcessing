@@ -103,9 +103,15 @@ def guard_rows(rows: Iterable[dict], geocoder: Optional[Geocoder] = None, label:
 
 
 class KakaoGeocoder:
-    """카카오 로컬 주소 검색. 같은 주소는 한 번만 묻는다. 키·쿼터 오류가 나면 이번 실행에서는 더 묻지 않는다."""
+    """카카오 로컬 주소 검색. 같은 주소는 한 번만 묻는다. 키·쿼터 오류가 나면 이번 실행에서는 더 묻지 않는다.
+
+    건물(ROAD_ADDR)·지번(REGION_ADDR) 단위 결과만 좌표로 쓴다. 카카오는 도로명만 주면 도로(ROAD),
+    시·구·동만 주면 행정구역(REGION) 결과를 돌려주는데, 그 좌표는 도로·구역의 중심점이라 시설 위치로 쓸 수 없다.
+    아래 재시도(끝 단어 떼기)에서 건물번호가 떨어지면 이런 결과가 나오므로 같은 기준으로 거른다.
+    """
 
     URL = 'https://dapi.kakao.com/v2/local/search/address.json'
+    PRECISE_TYPES = ('ROAD_ADDR', 'REGION_ADDR')
 
     def __init__(self, key: str, timeout: float = 10.0, delay: float = 0.12):
         self._key, self._timeout, self._delay = key, timeout, delay
@@ -114,15 +120,17 @@ class KakaoGeocoder:
         self.calls = 0
 
     def _ask(self, query: str) -> Optional[Tuple[float, float]]:
-        url = self.URL + '?' + urllib.parse.urlencode({'query': query, 'size': 1})
+        url = self.URL + '?' + urllib.parse.urlencode({'query': query, 'size': 5})  # 도로·건물 결과가 섞여 올 수 있어 몇 건 받아 고른다
         req = urllib.request.Request(url, headers={'Authorization': 'KakaoAK ' + self._key})
         self.calls += 1
         with urllib.request.urlopen(req, timeout=self._timeout) as resp:
             docs = json.load(resp).get('documents') or []
         time.sleep(self._delay)
-        if not docs:
-            return None
-        return float(docs[0]['y']), float(docs[0]['x'])
+        for doc in docs:
+            # 도로·행정구역 중심점은 버리고, 건물·지번 단위 첫 결과만 쓴다
+            if doc.get('address_type') in self.PRECISE_TYPES:
+                return float(doc['y']), float(doc['x'])
+        return None
 
     def __call__(self, addr: str) -> Optional[Tuple[float, float]]:
         if self.disabled or not addr:
@@ -133,7 +141,8 @@ class KakaoGeocoder:
         try:
             hit = self._ask(addr)
             if hit is None:
-                # 끝의 상세(동·층·호)를 한 단어씩 떼며 두 번 더 찾아본다
+                # 끝의 상세(동·층·호)를 한 단어씩 떼며 두 번 더 찾아본다.
+                # 건물번호까지 떨어진 질의는 도로·행정구역 결과만 나오므로 _ask 가 버린다
                 parts = addr.split()
                 for n in (1, 2):
                     if len(parts) - n < 3:

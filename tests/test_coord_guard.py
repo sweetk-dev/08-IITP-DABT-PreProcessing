@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import unittest
@@ -113,11 +114,42 @@ class KakaoGeocoderTests(unittest.TestCase):
 
     def test_hit(self):
         g = coord_guard.KakaoGeocoder('k', delay=0)
-        body = io.BytesIO('{"documents":[{"y":"37.37","x":"126.95"}]}'.encode())
+        body = io.BytesIO('{"documents":[{"address_type":"ROAD_ADDR","y":"37.37","x":"126.95"}]}'.encode())
         with mock.patch('urllib.request.urlopen', return_value=mock.MagicMock(__enter__=lambda s: body, __exit__=lambda *a: None)):
             self.assertEqual(g('경기도 안양시 동안구 경수대로 539'), (37.37, 126.95))
             self.assertEqual(g('경기도 안양시 동안구 경수대로 539'), (37.37, 126.95))
             self.assertEqual(g.calls, 1)
+
+
+    @staticmethod
+    def _resp(docs):
+        body = io.BytesIO(json.dumps({'documents': docs}).encode())
+        return mock.MagicMock(__enter__=lambda s: body, __exit__=lambda *a: None)
+
+    def test_road_and_region_rejected(self):
+        """도로·행정구역 중심점은 좌표로 쓰지 않는다 — 재시도까지 모두 그런 결과면 못 찾은 것."""
+        g = coord_guard.KakaoGeocoder('k', delay=0)
+        answers = [[],                                                         # 원래 주소: 없음
+                   [{'address_type': 'ROAD', 'y': '37.40', 'x': '126.97'}],    # 건물번호 뗀 도로명
+                   [{'address_type': 'REGION', 'y': '37.39', 'x': '126.95'}]]  # 구 이름까지
+        with mock.patch('urllib.request.urlopen', side_effect=[self._resp(a) for a in answers]) as m:
+            self.assertIsNone(g('경기도 안양시 동안구 인덕원로24번길 12'))
+            self.assertEqual(m.call_count, 3)
+
+    def test_precise_result_after_imprecise_first(self):
+        """한 응답에 도로 결과가 먼저 와도 뒤의 건물 단위 결과를 쓴다."""
+        g = coord_guard.KakaoGeocoder('k', delay=0)
+        docs = [{'address_type': 'ROAD', 'y': '37.40', 'x': '126.97'},
+                {'address_type': 'ROAD_ADDR', 'y': '37.3826', 'x': '126.9105'}]
+        with mock.patch('urllib.request.urlopen', return_value=self._resp(docs)):
+            self.assertEqual(g('경기도 안양시 만안구 병목안로247번길 37'), (37.3826, 126.9105))
+
+    def test_jibun_result_used(self):
+        """지번 주소(REGION_ADDR)는 필지 좌표라 쓴다."""
+        g = coord_guard.KakaoGeocoder('k', delay=0)
+        docs = [{'address_type': 'REGION_ADDR', 'y': '37.4015', 'x': '126.9746'}]
+        with mock.patch('urllib.request.urlopen', return_value=self._resp(docs)):
+            self.assertEqual(g('경기도 안양시 동안구 관양동 1490-4'), (37.4015, 126.9746))
 
 
 class FacilitySqlTests(unittest.TestCase):
